@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Legacy backup exclusions (pre-Android 12, Auto Backup).
+  Same policy as data_extraction_rules.xml: credential-bearing
+  SharedPreferences (map keys, BLE pairing) and saved places stay
+  out of backups.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="comma_client.xml" />
+    <exclude domain="sharedpref" path="galaxy_ble.xml" />
+    <exclude domain="sharedpref" path="bookmarks.xml" />
+</full-backup-content>

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Backup / transfer exclusions (Android 12+).
+  comma_client holds the user's Mapbox token and Google API key;
+  galaxy_ble holds the Bluetooth bridge pairing key. Neither may leave
+  the device through cloud backup or device-to-device transfer.
+  bookmarks (Home/Office/starred places) stays out of cloud backup.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="comma_client.xml" />
+        <exclude domain="sharedpref" path="galaxy_ble.xml" />
+        <exclude domain="sharedpref" path="bookmarks.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="comma_client.xml" />
+        <exclude domain="sharedpref" path="galaxy_ble.xml" />
+    </device-transfer>
+</data-extraction-rules>
