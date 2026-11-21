@@ -15,7 +15,7 @@ verified: { by: "jarvis:live-device-check", at: "2026-11-04" }
 ## The Links & Base URLs (Verified Live 2026-11-04)
 
 - **Local LAN Access:** `http://192.168.68.16:8082/` (comma interface `wlan0`, DHCP assigned).
-- **Wi-Fi Hotspot Access:** `http://172.31.254.1:8082/` (SSID: `TheGalaxy-XXXX`, Dongle ID suffix: `ec34`).
+- **Wi-Fi Hotspot Access:** `http://172.31.254.1:8082/` (SSID: `TheGalaxy-XXXX`, Dongle ID suffix: `XXXX`).
 - **Remote Reverse Tunnel:** `https://galaxy.firestar.link/<device-slug>` (paired frpc reverse tunnel to firestar.link gateway).
 - **Session Cookie:** `galaxy_session=<tunnel_id>:<token>` (automatically established for local LAN/hotspot peers; password authenticated for remote tunnel peers).
 
