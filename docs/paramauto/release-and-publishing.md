@@ -4,20 +4,28 @@ Reference: [developer.android.com/studio/publish](https://developer.android.com/
 
 This document details the complete end-to-end process for preparing, signing, building, and publishing **ParamAuto** to the Google Play Store and distributing release builds.
 
+> **Current state (2026-11-21):** Package `com.bogala.paramauto`, source in
+> this public repo. Releases are published with the **Play Developer API**
+> by an automated nightly job (and on demand) — not by manual console
+> upload. The internal track and the closed testing track both carry
+> 0.1.0 (42). Production access is pending Google's requirement of 12+
+> opted-in closed testers over 14+ days; open testing unlocks only after
+> production access is granted.
+
 ---
 
 ## 1. Release Configuration Overview
 
 The project is pre-configured with industry-standard Android release optimization and security requirements:
 
-- **Target SDK**: Android 14 (API 34), fully meeting Google Play requirements.
+- **Target SDK**: Release builds target Android 16 (API 36), fully meeting Google Play requirements. (The source tree compiles against API 34; the release pipeline stamps API 36.)
 - **R8 Code & Resource Shrinking**:
   - `minifyEnabled true`: Obfuscates code, removes unused classes/methods, and shrinks APK/AAB size by >60%.
   - `shrinkResources true`: Strips unused drawable/layout resources.
   - Custom rules in [app/proguard-rules.pro](../../app/proguard-rules.pro) protect AndroidX Car App Library, MapLibre GL Native SDK (JNI), and telemetry/state models.
   - Strips debug logging (`Log.v`, `Log.d`) from release builds automatically.
 - **Android App Bundle (.aab)**: Supported via `./gradlew bundleRelease` (required for Google Play).
-- **Network Security Configuration**: Configured in [app/src/main/res/xml/network_security_config.xml](../../app/src/main/res/xml/network_security_config.xml) to explicitly permit local cleartext communication with Comma 3/3X/4 local IP addresses (port 8082) while requiring HTTPS/TLS for public connections.
+- **Network Security Configuration**: Configured in [app/src/main/res/xml/network_security_config.xml](../../app/src/main/res/xml/network_security_config.xml). Cleartext HTTP is permitted because the comma serves its Galaxy API over plain HTTP on local networks (port 8082) and its LAN address is not fixed; every internet endpoint used by the app (Google, Mapbox, Photon, Overpass) is HTTPS in code.
 - **Export Hardening**: Internal activities (e.g. `GalaxyWebActivity`) are set to `android:exported="false"`.
 
 ---

@@ -9,6 +9,9 @@ trust_tier: authoritative
 inspected_at: "2026-10-31"
 ---
 
+> **Status note (2026-11-21):** Dated snapshot. Most gaps identified here were closed in the November 2026 releases (comma settings, Wi-Fi manager, recordings playback, and more) — see the [README](../../README.md) feature list for the current state.
+
+
 # Galaxy Web vs ParamAuto: Feature Parity & Gap Analysis
 
 **Date:** October 31, 2026  

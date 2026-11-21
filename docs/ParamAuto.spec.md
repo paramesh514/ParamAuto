@@ -1,3 +1,5 @@
+> **Status note (2026-11-21):** This is the original design specification from October 2026, kept as a snapshot. The shipped app has evolved well beyond it — see the [README](../../README.md) feature list and [architecture.md](paramauto/architecture.md) for the current design.
+
 # ParamAuto Specification & Implementation Design
 
 **Document:** `ParamAuto.spec.md`  
