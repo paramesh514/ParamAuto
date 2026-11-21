@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+      ParamAuto communicates with the local comma device (built-in Galaxy HTTP API
+      on port 8082) over local Wi-Fi, LAN, or comma hotspot (e.g. 172.31.254.1 / 192.168.x.x).
+      Raw IP endpoints require cleartext HTTP traffic.
+    -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
+

@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home-screen widget (Feature 20): last-known comma state, rendered by
+     CommaWidgetProvider from the "comma_widget" preferences only. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_bg"
+    android:orientation="vertical"
+    android:padding="12dp">
+
+    <TextView
+        android:id="@+id/widget_line1"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:ellipsize="end"
+        android:singleLine="true"
+        android:textColor="#E3E3E3"
+        android:textSize="15sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/widget_line2"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:ellipsize="end"
+        android:singleLine="true"
+        android:textColor="#8AB4F8"
+        android:textSize="13sp" />
+
+    <TextView
+        android:id="@+id/widget_line3"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:ellipsize="end"
+        android:singleLine="true"
+        android:textColor="#E3E3E3"
+        android:textSize="13sp" />
+
+    <TextView
+        android:id="@+id/widget_line4"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:ellipsize="end"
+        android:singleLine="true"
+        android:textColor="#9AA0A6"
+        android:textSize="11sp" />
+</LinearLayout>

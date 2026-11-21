@@ -1,0 +1,91 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+def keystorePropsFile = rootProject.file("keystore.properties")
+def keystoreProps = new Properties()
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { stream -> keystoreProps.load(stream) }
+}
+
+def releaseStoreFile = keystoreProps.getProperty("storeFile") ?: System.getenv("KEYSTORE_FILE")
+def releaseStorePassword = keystoreProps.getProperty("storePassword") ?: System.getenv("KEYSTORE_PASSWORD")
+def releaseKeyAlias = keystoreProps.getProperty("keyAlias") ?: System.getenv("KEY_ALIAS")
+def releaseKeyPassword = keystoreProps.getProperty("keyPassword") ?: System.getenv("KEY_PASSWORD")
+
+def hasSigningConfig = releaseStoreFile && (file(releaseStoreFile).exists() || rootProject.file(releaseStoreFile).exists()) && releaseStorePassword && releaseKeyAlias
+
+android {
+    namespace 'com.parampilot.auto'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.bogala.paramauto"
+        minSdk 29
+        targetSdk 34
+        versionCode 10
+        versionName "0.1.0"
+    }
+
+    signingConfigs {
+        release {
+            if (hasSigningConfig) {
+                def storeF = file(releaseStoreFile).exists() ? file(releaseStoreFile) : rootProject.file(releaseStoreFile)
+                storeFile storeF
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword ?: releaseStorePassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (hasSigningConfig) {
+                signingConfig signingConfigs.release
+            }
+        }
+        debug {
+            minifyEnabled false
+            debuggable true
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
+
+    bundle {
+        language {
+            enableSplit = false
+        }
+        density {
+            enableSplit = true
+        }
+        abi {
+            enableSplit = true
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.car.app:app:1.7.0'
+    implementation 'androidx.car.app:app-projected:1.7.0'
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'org.maplibre.gl:android-sdk:11.5.0'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20240303'
+}
