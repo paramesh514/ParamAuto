@@ -30,8 +30,16 @@ data class SoftwareUpdatePending(
     val lastAttemptMs: Long,
     /** When the comma accepted an install POST (2xx); 0 = not yet. */
     val acceptedAtMs: Long = 0L,
-    /** True once the heartbeat has been seen down after acceptance. */
-    val commaWentDown: Boolean = false
+    /** True once the heartbeat has been seen down after an acted-on attempt. */
+    val commaWentDown: Boolean = false,
+    /**
+     * True when the latest install POST got NO answer back (transport
+     * failure or ambiguous outcome — Addendum 134): the comma may have
+     * executed it and gone down to reboot before the response arrived.
+     * An install the comma answered with an error status is a refusal,
+     * NOT unconfirmed — it retries on the normal cadence.
+     */
+    val attemptUnconfirmed: Boolean = false
 )
 
 /**
@@ -59,10 +67,29 @@ object SoftwareUpdatePlan {
         nowMs: Long
     ): Decision {
         if (pending == null) return Decision.IDLE
+        // Addendum 134: a successful install takes the comma down to
+        // reboot, which can eat the POST's own success response — so
+        // acceptance-by-response is unreliable for this action. An
+        // attempt the comma acted on (accepted 2xx, or unconfirmed
+        // because no answer came back) followed by the reboot cycle
+        // (heartbeat down, then back) IS the completion evidence. An
+        // attempt the comma answered with an error is a refusal: its
+        // later reboots prove nothing, so it never completes this way.
+        val actedOn = pending.acceptedAtMs > 0L || pending.attemptUnconfirmed
+        if (pending.commaWentDown && actedOn) {
+            return if (heartbeatUp) Decision.COMPLETED else Decision.WAITING
+        }
         if (pending.acceptedAtMs > 0L) {
             if (!heartbeatUp) return Decision.WAITING
-            if (pending.commaWentDown) return Decision.COMPLETED
             return if (nowMs - pending.acceptedAtMs >= NO_REBOOT_WINDOW_MS) {
+                Decision.COMPLETED
+            } else {
+                Decision.WAITING
+            }
+        }
+        if (pending.attemptUnconfirmed && pending.lastAttemptMs > 0L) {
+            if (!heartbeatUp) return Decision.WAITING
+            return if (nowMs - pending.lastAttemptMs >= NO_REBOOT_WINDOW_MS) {
                 Decision.COMPLETED
             } else {
                 Decision.WAITING

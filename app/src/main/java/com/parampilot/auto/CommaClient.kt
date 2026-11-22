@@ -2257,9 +2257,13 @@ class CommaClient(private val context: Context) {
             }
             NavStateManager.softwareUpdatePending = true
             val heartbeatUp = deviceState != null
-            // Record the comma going down after an accepted install:
-            // its return is the completion signal.
-            if (!heartbeatUp && pending.acceptedAtMs > 0L && !pending.commaWentDown) {
+            // Record the comma going down after an acted-on install
+            // attempt (accepted, or unconfirmed because the response
+            // was lost — Addendum 134): its return is the completion
+            // signal.
+            if (!heartbeatUp && !pending.commaWentDown &&
+                (pending.acceptedAtMs > 0L || pending.attemptUnconfirmed)
+            ) {
                 pending = pending.copy(commaWentDown = true)
                 SoftwareUpdateIntentStore.save(context, pending)
             }
@@ -2271,16 +2275,39 @@ class CommaClient(private val context: Context) {
                     val (code, _) = CommaSoftwareUpdate(client).postAction(
                         "install", pending.branch.ifEmpty { null }
                     )
-                    val attempted = pending.copy(lastAttemptMs = now)
-                    SoftwareUpdateIntentStore.save(
-                        context,
-                        if (code in 200..299) attempted.copy(acceptedAtMs = now) else attempted
+                    // Addendum 134: classify the outcome. A 2xx is an
+                    // acceptance. An HTTP error status is the comma
+                    // answering with a refusal — keep retrying. NO
+                    // answer at all (transport failure -1, or the BLE
+                    // ambiguous code) means the install may have
+                    // started and taken the comma down before the
+                    // response arrived: mark the attempt unconfirmed
+                    // and let the reboot cycle (or the no-reboot
+                    // window) complete it instead of retrying forever.
+                    val attempted = pending.copy(
+                        lastAttemptMs = now,
+                        acceptedAtMs = if (code in 200..299) now else pending.acceptedAtMs,
+                        attemptUnconfirmed = when {
+                            code in 200..299 -> false
+                            code == -1 || code == SgGalaxyClient.CODE_AMBIGUOUS -> true
+                            else -> false
+                        }
                     )
+                    SoftwareUpdateIntentStore.save(context, attempted)
                 }
                 SoftwareUpdatePlan.Decision.COMPLETED -> {
                     SoftwareUpdateIntentStore.clear(context)
                     NavStateManager.softwareUpdatePending = false
-                    NavStateManager.softwareUpdateCompletionNote = "Comma software updated"
+                    // The reboot cycle or an acceptance proves the
+                    // update ran; a no-reboot window after an
+                    // unconfirmed attempt only proves the state is
+                    // stale, so say so instead of claiming success.
+                    NavStateManager.softwareUpdateCompletionNote =
+                        if (pending.acceptedAtMs > 0L || pending.commaWentDown) {
+                            "Comma software updated"
+                        } else {
+                            "Update state cleared — reopen Comma software to check"
+                        }
                 }
                 else -> Unit
             }
