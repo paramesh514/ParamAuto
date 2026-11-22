@@ -74,6 +74,13 @@ ParamAuto's privacy policy: https://bogala.in/privacy/paramauto.html
 Your map keys stay on your phone and your comma. The app has no analytics,
 no ads and no accounts.
 
+## Check out Muse
+
+Check out Muse, your personal AI agent. Redeem my code in Settings within 48 hours of joining and we'll both get 1 billion Muse tokens.
+
+Code: NI9ADY
+https://muse.ai/join
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
