@@ -175,6 +175,19 @@ class SearchScreen(
     }
 
     private fun onDestinationSelected(dest: NavDestination) {
+        // Queue lock (Param, 2026-11-21): while a destination is
+        // queued, no NEW destination is accepted — the queued one
+        // must be sent or cancelled first.
+        val queuedNow = NavStateManager.queuedDestination
+            ?: DestinationQueue.loadEntry(carContext)?.displayDestination()
+        if (queuedNow != null && !queuedNow.name.equals(dest.name, ignoreCase = true)) {
+            CarToast.makeText(
+                carContext,
+                "A destination is already queued — it must be sent or cancelled before choosing another",
+                CarToast.LENGTH_LONG
+            ).show()
+            return
+        }
         NavStateManager.markDestinationSelected(dest)
         val feederTarget = client.getEffectiveNavigationEndpoint()
         if (NavStateManager.usePhoneLocationToComma && !feederTarget.isNullOrBlank()) {
@@ -257,6 +270,13 @@ class SearchScreen(
 
             android.os.Handler(android.os.Looper.getMainLooper()).post {
                 if (sendOk) {
+                    // A live send of the queued destination itself
+                    // clears the queue — it is no longer waiting.
+                    if (NavStateManager.queuedDestination?.isSameAs(resolved) == true) {
+                        DestinationQueue.clear(carContext)
+                        NavStateManager.queuedDestination = null
+                        NavStateManager.queuedOutOfSync = false
+                    }
                     DestinationHistory.record(carContext, resolved)
                     NavStateManager.activeDestination = resolved
                     NavStateManager.setNavClearedByUser(false)
@@ -273,29 +293,33 @@ class SearchScreen(
                     CarToast.makeText(carContext, "Navigating to ${resolved.name}", CarToast.LENGTH_SHORT).show()
                     try { screenManager.pop() } catch (e: Exception) { android.util.Log.w("ParamAuto", "Ignored failure: ${e.javaClass.simpleName}: ${e.message}") }
                 } else {
-                    val isOffline = !NavStateManager.commaFound
+                    // Addendum 122/123: queue on ANY send failure —
+                    // offline, or connected but not accepted (out of
+                    // sync). The flush retries every 15 s while the
+                    // comma is connected.
+                    val outOfSync = NavStateManager.commaFound
                     var queued = false
-                    if (isOffline) {
-                        if (resolved.hasCoordinates) {
-                            DestinationQueue.save(carContext, resolved)
-                            NavStateManager.queuedDestination = resolved
+                    if (resolved.hasCoordinates) {
+                        DestinationQueue.save(carContext, resolved)
+                        NavStateManager.queuedDestination = resolved
+                        NavStateManager.queuedOutOfSync = outOfSync
+                        NavStateManager.notifyChanged()
+                        queued = true
+                    } else if (isCommaSuggestion) {
+                        val id = resolvedCandidate.mapboxId?.takeIf { it.isNotBlank() }
+                        val query = searchQuery.trim().ifEmpty { null }
+                        if (id != null || query != null) {
+                            DestinationQueue.saveCommaPlace(carContext, resolvedCandidate.name, resolvedCandidate.placeName, id, query)
+                            NavStateManager.queuedDestination = resolvedCandidate
+                            NavStateManager.queuedOutOfSync = outOfSync
                             NavStateManager.notifyChanged()
                             queued = true
-                        } else if (isCommaSuggestion) {
-                            val id = resolvedCandidate.mapboxId?.takeIf { it.isNotBlank() }
-                            val query = searchQuery.trim().ifEmpty { null }
-                            if (id != null || query != null) {
-                                DestinationQueue.saveCommaPlace(carContext, resolvedCandidate.name, resolvedCandidate.placeName, id, query)
-                                NavStateManager.queuedDestination = resolvedCandidate
-                                NavStateManager.notifyChanged()
-                                queued = true
-                            }
                         }
                     }
                     if (queued) {
                         CarToast.makeText(
                             carContext,
-                            "Comma offline — destination queued, will send when it connects",
+                            DestinationQueue.label(resolved, outOfSync, NavStateManager.commaNetworks),
                             CarToast.LENGTH_LONG
                         ).show()
                         try { screenManager.pop() } catch (e: Exception) { android.util.Log.w("ParamAuto", "Ignored failure: ${e.javaClass.simpleName}: ${e.message}") }
@@ -344,11 +368,12 @@ class SearchScreen(
         if (queuedDest != null && searchQuery.isEmpty()) {
             listBuilder.addItem(
                 Row.Builder()
-                    .setTitle("Queued: ${queuedDest.name}")
-                    .addText("Comma offline · Tap to cancel")
+                    .setTitle(DestinationQueue.label(queuedDest, NavStateManager.queuedOutOfSync, NavStateManager.commaNetworks))
+                    .addText("Tap to cancel")
                     .setOnClickListener {
                         DestinationQueue.clear(carContext)
                         NavStateManager.queuedDestination = null
+                        NavStateManager.queuedOutOfSync = false
                         NavStateManager.notifyChanged()
                         CarToast.makeText(carContext, "Queued destination cancelled", CarToast.LENGTH_SHORT).show()
                         invalidate()

@@ -1057,7 +1057,7 @@ class CommaClient(private val context: Context) {
             val lastScanned = getLastScannedIp()
             val fallbackIp = userProvided ?: lastScanned ?: "192.168.68.9"
 
-            val scannedIp = scanner.discover(userProvided ?: lastScanned)
+            val scannedIp = probeCloudReportedAddresses() ?: scanner.discover(userProvided ?: lastScanned)
             if (scannedIp != null) {
                 commaIp = scannedIp
                 isGalaxyCloud = false
@@ -1197,7 +1197,7 @@ class CommaClient(private val context: Context) {
         val foundLocal = if (quickOnly) {
             scanner.quickCheckLan()
         } else {
-            scanner.discover(savedIp)
+            probeCloudReportedAddresses() ?: scanner.discover(savedIp)
         } ?: return false
         notifyDiagnostic("Connected to local comma ($foundLocal:8082)")
         Thread {
@@ -1353,6 +1353,49 @@ class CommaClient(private val context: Context) {
         }, "comma-ble-failover").start()
     }
 
+    /**
+     * Addendum 123 (Param, 2026-11-21): before any subnet scan, ask
+     * the comma itself which addresses it is listening on — GET
+     * /api/local-access over the configured Galaxy Cloud session —
+     * and probe just those addresses. Returns the first candidate
+     * that verifies as the comma, or null when Cloud is not
+     * configured, no session token is stored, LAN probing is not
+     * allowed (Wi-Fi and hotspot both off), or no candidate answers;
+     * callers then fall back to their scan exactly as before. Never
+     * prompts: a missing or expired cloud session just skips the step.
+     */
+    private fun probeCloudReportedAddresses(): String? {
+        if (!isCloudConfigured()) return null
+        if (!scanner.lanScanAllowed()) return null
+        val token = GalaxyCloudSession.currentToken()?.takeIf { it.isNotEmpty() } ?: return null
+        val base = getGalaxyCloudBase().trimEnd('/')
+        val body = try {
+            val conn = (URL("$base/api/local-access").openConnection() as HttpURLConnection).apply {
+                connectTimeout = 4000
+                readTimeout = 4000
+                instanceFollowRedirects = false
+                setRequestProperty("Cookie", "${GalaxyCloudSession.COOKIE_NAME}=$token")
+                setRequestProperty("Accept", "application/json")
+            }
+            if (conn.responseCode != 200) {
+                Log.d(TAG, "local-access over Cloud returned HTTP ${conn.responseCode}")
+                return null
+            }
+            conn.inputStream.bufferedReader().use { it.readText() }
+        } catch (e: Exception) {
+            Log.d(TAG, "local-access over Cloud failed: ${e.message}")
+            return null
+        }
+        val ips = BleFailover.parseLocalAccessIps(JSONObject(body))
+        for (candidate in ips) {
+            if (scanner.isPortOpen(candidate) && scanner.verifyComma(candidate)) {
+                notifyDiagnostic("Comma address from Galaxy ($candidate) — no scan needed")
+                return candidate
+            }
+        }
+        return null
+    }
+
     private val localAccessLearnInFlight = AtomicBoolean(false)
 
     @Volatile
@@ -1439,18 +1482,19 @@ class CommaClient(private val context: Context) {
 
     /**
      * Offline destination queue flush (Feature 10): called from the poll
-     * loop whenever a telemetry fetch just succeeded. Runs at most one
+     * loop whenever a telemetry fetch just succeeded, so an attempt
+     * only ever runs while the comma is connected. Runs at most one
      * background flush at a time; the send itself is a normal
      * device-confirmed flow — the SG coordinate select for COORDS
      * entries, a re-search + selectPlace for COMMA_PLACE entries
-     * (Fix B). On confirmation the queue clears; on failure the attempt
-     * is counted and the entry stays queued until
-     * [DestinationQueue.MAX_FLUSH_ATTEMPTS] is reached.
+     * (Fix B). On confirmation the queue clears; on failure the entry
+     * stays queued and is retried every
+     * [DestinationQueue.FLUSH_RETRY_INTERVAL_MS] (Param, 2026-11-21).
      */
     private fun maybeFlushQueuedDestination() {
         if (!NavStateManager.isSgGalaxy) return
         val entry = DestinationQueue.loadEntry(context)
-        if (!DestinationQueue.shouldFlush(commaFound = true, hasQueued = entry != null, attempts = DestinationQueue.flushAttempts, lastFailureAtMs = DestinationQueue.lastFlushFailureAtMs)) return
+        if (!DestinationQueue.shouldFlush(commaFound = true, hasQueued = entry != null, lastFailureAtMs = DestinationQueue.lastFlushFailureAtMs)) return
         if (!queueFlushInFlight.compareAndSet(false, true)) return
         val queued = entry!!
         Thread({
@@ -1467,11 +1511,28 @@ class CommaClient(private val context: Context) {
                     DestinationQueue.clear(context)
                     DestinationQueue.noteFlushSuccess()
                     NavStateManager.queuedDestination = null
+                    NavStateManager.queuedOutOfSync = false
                     NavStateManager.notifyChanged()
                     notifyDiagnostic("Queued destination sent to comma: ${queued.name}")
                 } else {
                     DestinationQueue.noteFlushFailure()
-                    notifyDiagnostic("Queued destination send failed — will retry on the next connection")
+                    // The comma answered but still did not accept the
+                    // destination: phone and comma are out of sync
+                    // (Addendum 122) — the queued indicator switches to
+                    // the connect-the-comma-to-the-Internet message.
+                    // Refresh the comma's network snapshot so the
+                    // message can name the Wi-Fi it is on (Param,
+                    // 2026-11-21), then notify either way: the Wi-Fi
+                    // detail may have changed even when the sync flag
+                    // did not.
+                    NavStateManager.queuedOutOfSync = true
+                    try {
+                        NavigationManager().fetchNetworksSg(baseUrl)
+                    } catch (e: Exception) {
+                        Log.d(TAG, "Networks refresh for the sync message failed: ${e.message}")
+                    }
+                    NavStateManager.notifyChanged()
+                    notifyDiagnostic("Queued destination send failed — will retry in 15 seconds while the comma stays connected")
                 }
             } catch (e: Exception) {
                 DestinationQueue.noteFlushFailure()

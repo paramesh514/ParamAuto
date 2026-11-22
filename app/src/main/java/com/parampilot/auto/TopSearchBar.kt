@@ -51,10 +51,10 @@ class TopSearchBar(
     private lateinit var searchInput: EditText
     private lateinit var clearBtn: TextView
     private lateinit var micBtn: PlaceVectorIconView
-    private lateinit var budgetLabel: TextView
     private lateinit var queuedRow: LinearLayout
     private lateinit var queuedLabel: TextView
     private var queuedDestShown: NavDestination? = null
+    private var queuedShownSync: Boolean = false
     private var onQueuedCancel: (() -> Unit)? = null
     private lateinit var quickChipsRow: LinearLayout
     private lateinit var resultsCard: ScrollView
@@ -206,17 +206,6 @@ class TopSearchBar(
         }
         searchBar.addView(micBtn)
         rootContainer.addView(searchBar)
-
-        // 1b. Comma search budget line (Feature 6): visible only while a
-        // budget is known; text comes from MapboxUsage.label().
-        budgetLabel = TextView(context).apply {
-            textSize = 12.5f
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setTextColor(HudOverlay.COLOR_TEXT_MUTED)
-            setPadding(dp(16), dp(6), dp(16), 0)
-            visibility = View.GONE
-        }
-        rootContainer.addView(budgetLabel)
 
         // 1c. Offline queue chip (Feature 10): the destination waiting to
         // be sent when the comma reconnects; tapping cancels the queue.
@@ -757,27 +746,8 @@ class TopSearchBar(
         quickChipsRow.visibility = View.GONE
     }
 
-    /** Feature 6: comma search budget line under the search bar; null hides it. */
-    fun setSearchBudget(text: String?, warning: Boolean) {
-        if (!::budgetLabel.isInitialized) return
-        if (text == null) {
-            budgetLabel.visibility = View.GONE
-            return
-        }
-        budgetLabel.text = text
-        val night = ThemeManager.isNightMode(context)
-        budgetLabel.setTextColor(
-            when {
-                warning -> HudOverlay.COLOR_ACCENT_AMBER
-                night -> HudOverlay.COLOR_TEXT_MUTED
-                else -> HudOverlay.COLOR_TEXT_MUTED_LIGHT
-            }
-        )
-        budgetLabel.visibility = View.VISIBLE
-    }
-
     /** Feature 10: the offline-queue chip; null hides it. Tapping it (or its ✕) cancels via [onCancel]. */
-    fun setQueuedDestination(dest: NavDestination?, onCancel: () -> Unit) {
+    fun setQueuedDestination(dest: NavDestination?, outOfSync: Boolean, onCancel: () -> Unit) {
         if (!::queuedRow.isInitialized) return
         onQueuedCancel = onCancel
         if (dest == null) {
@@ -785,9 +755,13 @@ class TopSearchBar(
             queuedRow.visibility = View.GONE
             return
         }
-        if (queuedDestShown?.isSameAs(dest) == true && queuedRow.visibility == View.VISIBLE) return
+        val label = DestinationQueue.label(dest, outOfSync, NavStateManager.commaNetworks)
+        if (queuedDestShown?.isSameAs(dest) == true && queuedShownSync == outOfSync &&
+            queuedLabel.text.toString() == label && queuedRow.visibility == View.VISIBLE
+        ) return
         queuedDestShown = dest
-        queuedLabel.text = "Queued: ${dest.name} — will send when the comma connects"
+        queuedShownSync = outOfSync
+        queuedLabel.text = label
         queuedRow.visibility = View.VISIBLE
     }
 

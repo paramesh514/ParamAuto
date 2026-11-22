@@ -37,6 +37,18 @@ class TurnBannerView(
     private lateinit var laneRow: LinearLayout
     private lateinit var laneArrowsContainer: LinearLayout
     private lateinit var rerouteLabel: TextView
+    private lateinit var queuedRow: LinearLayout
+    private lateinit var queuedLabel: TextView
+    private var onQueuedCancel: (() -> Unit)? = null
+    private var queuedShownFor: NavDestination? = null
+    private var queuedShownSync: Boolean = false
+    // Route-end state card (backlog #3, moved to the bottom in
+    // Addendum 122): a separate bottom-anchored card, so an ended
+    // route never covers the search bar at the top.
+    private lateinit var endCard: LinearLayout
+    private lateinit var endIcon: ManeuverIconView
+    private lateinit var endTitle: TextView
+    private lateinit var endSub: TextView
     private var isNight: Boolean = true
 
     fun attachTo(parent: FrameLayout) {
@@ -140,23 +152,114 @@ class TurnBannerView(
             visibility = View.GONE
         }
         root.addView(rerouteLabel)
+
+        // Offline queue row (Feature 10, Addendum 122): while a
+        // destination is queued for the comma, the phone keeps
+        // navigating locally (map-app mode) and this row — the ONE
+        // queued popup during navigation, with a close icon — rides
+        // under the maneuver card. Tapping the row or its ✕ cancels
+        // the queue and the local navigation with it.
+        queuedRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = HudOverlay.makeCardBg(ctx, HudOverlay.COLOR_SURFACE_DARK, 16, HudOverlay.COLOR_ACCENT_AMBER, 1)
+            elevation = 8f * den
+            setPadding(dp(12), dp(7), dp(8), dp(7))
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply {
+                setMargins(0, dp(6), 0, 0)
+            }
+            visibility = View.GONE
+            setOnClickListener { onQueuedCancel?.invoke() }
+        }
+        queuedLabel = TextView(ctx).apply {
+            textSize = 13f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setTextColor(0xFFE3E3E3.toInt())
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+        }
+        queuedRow.addView(queuedLabel)
+        queuedRow.addView(TextView(ctx).apply {
+            text = "✕"
+            textSize = 14f
+            setTextColor(HudOverlay.COLOR_ACCENT_AMBER)
+            setPadding(dp(10), dp(4), dp(8), dp(4))
+            setOnClickListener { onQueuedCancel?.invoke() }
+        })
+        root.addView(queuedRow)
         parent.addView(root)
+
+        // Route-end state card: bottom-anchored, drawn by
+        // showEndState. The STUCK state is tappable — it retries
+        // End Route (same handler as the old banner placement).
+        endCard = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = HudOverlay.makeCardBg(ctx, COLOR_GMAPS_NAV_DARK, 20)
+            elevation = 10f * den
+            setPadding(dp(16), dp(14), dp(18), dp(14))
+            layoutParams = FrameLayout.LayoutParams(-1, -2).apply {
+                gravity = Gravity.BOTTOM
+                setMargins(dp(12), 0, dp(12), dp(16))
+            }
+            visibility = View.GONE
+            setOnClickListener {
+                if (showingEndState == EndRouteConfidence.State.STUCK) onEndRouteClick?.invoke()
+            }
+        }
+        endIcon = ManeuverIconView(ctx).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(44), dp(44)).apply {
+                setMargins(0, 0, dp(14), 0)
+            }
+        }
+        endCard.addView(endIcon)
+        val endCol = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+        }
+        endTitle = TextView(ctx).apply {
+            textSize = 20f
+            typeface = Typeface.create("sans-serif", Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            includeFontPadding = false
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }
+        endCol.addView(endTitle)
+        endSub = TextView(ctx).apply {
+            textSize = 16f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setTextColor(0xEEFFFFFF.toInt())
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            setPadding(0, dp(2), 0, 0)
+        }
+        endCol.addView(endSub)
+        endCard.addView(endCol)
+        parent.addView(endCard)
+    }
+
+    /** Background color for the route-end card given its state. */
+    private fun endStateBg(state: EndRouteConfidence.State?): Int = when {
+        state == EndRouteConfidence.State.STUCK -> COLOR_END_STUCK
+        isNight -> COLOR_GMAPS_NAV_DARK
+        else -> COLOR_GMAPS_NAV_LIGHT
     }
 
     fun applyTheme(night: Boolean) {
         isNight = night
         if (::card.isInitialized) {
-            val bg = when {
-                showingEndState == EndRouteConfidence.State.STUCK -> COLOR_END_STUCK
-                night -> COLOR_GMAPS_NAV_DARK
-                else -> COLOR_GMAPS_NAV_LIGHT
-            }
+            val bg = if (night) COLOR_GMAPS_NAV_DARK else COLOR_GMAPS_NAV_LIGHT
             card.background = HudOverlay.makeCardBg(ctx, bg, 20)
             val laneBg = if (night) COLOR_GMAPS_LANE_DARK else COLOR_GMAPS_LANE_LIGHT
             laneRow.background = HudOverlay.makeCardBg(ctx, laneBg, 18)
             if (::rerouteLabel.isInitialized) {
                 rerouteLabel.background = HudOverlay.makeCardBg(ctx, laneBg, 14)
             }
+        }
+        if (::endCard.isInitialized) {
+            endCard.background = HudOverlay.makeCardBg(ctx, endStateBg(showingEndState), 20)
         }
     }
 
@@ -171,56 +274,81 @@ class TurnBannerView(
     private var showingEndState: EndRouteConfidence.State? = null
 
     /**
-     * Shows a comma-confirmed end state in the nav header instead of
-     * the maneuver: "Ending route…" while the clear is in flight,
-     * "Route ended ✓" once the comma confirms, "⚠ Comma still
-     * navigating" when the device kept the destination. The stuck card
-     * is tappable — it retries End Route (see the click listener wired
-     * in [attachTo]).
+     * Shows a comma-confirmed end state on the BOTTOM card instead of
+     * the maneuver banner (moved from the top in Addendum 122 — at the
+     * top it covered the search bar after a route ended): "Ending
+     * route…" while the clear is in flight, "Route ended ✓" once the
+     * comma confirms, "⚠ Comma still navigating" when the device kept
+     * the destination. The stuck card is tappable — it retries End
+     * Route (see the click listener wired in [attachTo]).
      */
     fun showEndState(state: EndRouteConfidence.State, destName: String?) {
         val title = EndRouteConfidence.title(state) ?: return
         showingEndState = state
-        if (!::root.isInitialized) return
+        if (!::endCard.isInitialized) return
+        // The maneuver banner clears the top of the screen.
+        if (::root.isInitialized) root.visibility = View.GONE
         if (isSuppressed) {
-            root.visibility = View.GONE
+            endCard.visibility = View.GONE
             return
         }
-        val bg = when {
-            state == EndRouteConfidence.State.STUCK -> COLOR_END_STUCK
-            isNight -> COLOR_GMAPS_NAV_DARK
-            else -> COLOR_GMAPS_NAV_LIGHT
-        }
-        card.background = HudOverlay.makeCardBg(ctx, bg, 20)
-        icon.setManeuver(if (state == EndRouteConfidence.State.ENDED) "arrive" else "straight", "")
-        distTv.textSize = 20f
-        distTv.text = title
+        endCard.background = HudOverlay.makeCardBg(ctx, endStateBg(state), 20)
+        endIcon.setManeuver(if (state == EndRouteConfidence.State.ENDED) "arrive" else "straight", "")
+        endTitle.text = title
         val sub = EndRouteConfidence.subtitle(state, destName)
         if (sub != null) {
-            streetTv.text = sub
-            streetTv.visibility = View.VISIBLE
+            endSub.text = sub
+            endSub.visibility = View.VISIBLE
         } else {
-            streetTv.visibility = View.GONE
+            endSub.visibility = View.GONE
         }
-        laneRow.visibility = View.GONE
-        rerouteLabel.visibility = View.GONE
-        card.isClickable = (state == EndRouteConfidence.State.STUCK)
-        root.visibility = View.VISIBLE
+        endCard.isClickable = (state == EndRouteConfidence.State.STUCK)
+        endCard.visibility = View.VISIBLE
     }
 
     /** Clears a shown end state; a no-op unless one is showing. The normal maneuver banner is re-drawn by [update] on the next fix. */
     fun hideEndState() {
         if (showingEndState == null) return
         showingEndState = null
+        if (::endCard.isInitialized) {
+            endCard.isClickable = false
+            endCard.visibility = View.GONE
+        }
         if (::root.isInitialized) {
-            card.isClickable = false
             root.visibility = View.GONE
         }
     }
 
     fun setSuppressed(suppressed: Boolean) {
         isSuppressed = suppressed
-        if (suppressed) root.visibility = View.GONE
+        if (suppressed) {
+            root.visibility = View.GONE
+            if (::endCard.isInitialized) endCard.visibility = View.GONE
+        }
+    }
+
+    /**
+     * Offline queue row (Addendum 122): [dest] non-null shows the row
+     * under the maneuver card; null hides it. Mirrors the top bar's
+     * queued chip — exactly one of the two is on screen at a time,
+     * because the top bar hides while navigating.
+     */
+    fun setQueued(dest: NavDestination?, outOfSync: Boolean, onCancel: () -> Unit) {
+        onQueuedCancel = onCancel
+        if (!::queuedRow.isInitialized) return
+        if (dest == null) {
+            queuedShownFor = null
+            queuedRow.visibility = View.GONE
+            return
+        }
+        val label = DestinationQueue.label(dest, outOfSync, NavStateManager.commaNetworks)
+        if (queuedShownFor?.isSameAs(dest) == true && queuedShownSync == outOfSync &&
+            queuedLabel.text.toString() == label && queuedRow.visibility == View.VISIBLE
+        ) return
+        queuedShownFor = dest
+        queuedShownSync = outOfSync
+        queuedLabel.text = label
+        queuedRow.visibility = View.VISIBLE
     }
 
     fun update(@Suppress("UNUSED_PARAMETER") nav: NavManeuver, dest: NavDestination? = null) {
@@ -230,6 +358,11 @@ class TurnBannerView(
         if (isSuppressed) {
             root.visibility = View.GONE
             return
+        }
+        // The queued row's visibility follows the recorded queued
+        // destination on every redraw (Addendum 122).
+        if (::queuedRow.isInitialized) {
+            queuedRow.visibility = if (queuedShownFor != null) View.VISIBLE else View.GONE
         }
         val route = NavStateManager.selectedRoute ?: NavStateManager.activeRoutes.firstOrNull()
         val car = NavStateManager.currentGps

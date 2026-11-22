@@ -317,6 +317,17 @@ object NavStateManager {
     @Volatile
     var queuedDestination: NavDestination? = null
 
+    /**
+     * Why the queued destination is waiting (Addendum 122): false =
+     * the comma is unreachable, the entry flushes when it connects;
+     * true = the comma was reached but did not accept the destination
+     * (typically no Internet on the comma) — phone and comma are out
+     * of sync, and the queued indicator asks the user to connect the
+     * comma to the Internet so it can get navigation details.
+     */
+    @Volatile
+    var queuedOutOfSync: Boolean = false
+
     /** Most recent drive from /api/drives/stats (Feature 13); null until polled. */
     @Volatile
     var lastDrive: LastDrive? = null

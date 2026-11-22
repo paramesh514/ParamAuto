@@ -97,6 +97,11 @@ data class GalaxyNetworks(
         val error: String?
     )
 
+    /** The name of the Wi-Fi network the comma is connected to right
+     * now, or null when no saved network reports itself connected. */
+    fun connectedWifiName(): String? =
+        networks.firstOrNull { it.connected }?.name?.takeIf { it.isNotBlank() }
+
     /** "Connected to T-Mobile (LTE)." / "Not connected right now." /
      * "Off · comma goes online over Wi-Fi only." — the Galaxy page's
      * own wording. */
