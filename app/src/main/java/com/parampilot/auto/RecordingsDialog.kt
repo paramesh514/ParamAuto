@@ -62,29 +62,25 @@ object RecordingsDialog {
         val endpoint = client?.commaIp ?: NavStateManager.commaIp
         val sg = SgGalaxyClient(SgGalaxyClient.baseUrlFor(endpoint ?: "127.0.0.1"))
 
-        val body = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            background = HudOverlay.makeCardBg(activity, HudOverlay.COLOR_SURFACE_DARK, 0)
-            setPadding(dp(20), dp(16), dp(20), dp(16))
-        }
+        // Addendum 132: an M3 sheet (M3Sheet), like the Settings screens.
+        val (dialog, body, pal) = M3Sheet.create(activity, "Recordings on comma")
         val status = TextView(activity).apply {
             text = "Loading recordings…"
             textSize = 14f
             typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-            setTextColor(HudOverlay.COLOR_TEXT_MUTED)
+            setTextColor(pal.textSecondary)
         }
         body.addView(status)
         val listBox = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
         }
         body.addView(listBox)
-
-        val scroll = ScrollView(activity).apply { addView(body) }
-        val dialog = AlertDialog.Builder(activity)
-            .setTitle("Recordings on comma")
-            .setView(scroll)
-            .setPositiveButton("Done", null)
-            .create()
+        body.addView(
+            M3Sheet.buttonRow(
+                activity,
+                M3Sheet.primaryButton(activity, pal, "Done") { dialog.dismiss() }
+            )
+        )
         dialog.show()
 
         // Per-render detail state (Fix C). [generation] invalidates the
@@ -157,7 +153,7 @@ object RecordingsDialog {
                     text = entry.rowLabel()
                     textSize = 13.5f
                     typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-                    setTextColor(Color.WHITE)
+                    setTextColor(pal.textPrimary)
                     layoutParams = LinearLayout.LayoutParams(
                         0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
                     )
@@ -168,7 +164,7 @@ object RecordingsDialog {
                     text = "Play"
                     textSize = 13f
                     typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-                    setTextColor(Color.WHITE)
+                    setTextColor(pal.accentBlue)
                     setPadding(dp(12), dp(4), dp(2), dp(4))
                     setOnClickListener {
                         if (!checkLocalForVideo(activity)) {
@@ -189,7 +185,7 @@ object RecordingsDialog {
                     text = "Download"
                     textSize = 13f
                     typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-                    setTextColor(HudOverlay.COLOR_TEXT_MUTED)
+                    setTextColor(pal.textSecondary)
                     setPadding(dp(10), dp(4), dp(2), dp(4))
                     setOnClickListener {
                         if (!checkLocalForVideo(activity)) {
@@ -230,7 +226,7 @@ object RecordingsDialog {
     private fun load(
         activity: Activity,
         sg: SgGalaxyClient,
-        dialog: AlertDialog,
+        dialog: android.app.Dialog,
         status: TextView,
         listBox: LinearLayout,
         render: (List<RecordingEntry>) -> Unit
@@ -282,20 +278,31 @@ object RecordingsDialog {
         title: String,
         onPick: (RecordingMedia.Camera) -> Unit
     ) {
-        val labels = cameras.map { camera ->
-            if (camera.hint.isEmpty()) {
-                camera.label
-            } else {
-                "${camera.label} · ${camera.hint}"
+        // Addendum 132: an M3 sheet with tappable rows, not a list dialog.
+        val (dialog, body, pal) = M3Sheet.create(activity, title)
+        val den = activity.resources.displayMetrics.density
+        fun dp(v: Int) = (v * den).roundToInt()
+        for (camera in cameras) {
+            val row = TextView(activity).apply {
+                text = if (camera.hint.isEmpty()) {
+                    camera.label
+                } else {
+                    "${camera.label} · ${camera.hint}"
+                }
+                textSize = 15f
+                typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+                setTextColor(pal.textPrimary)
+                setPadding(dp(4), dp(13), dp(4), dp(13))
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    dialog.dismiss()
+                    onPick(camera)
+                }
             }
+            body.addView(row)
         }
-        AlertDialog.Builder(activity)
-            .setTitle(title)
-            .setItems(labels.toTypedArray()) { _, which ->
-                onPick(cameras[which])
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
+        dialog.show()
     }
 
     /**
@@ -523,39 +530,49 @@ object RecordingsDialog {
         entry: RecordingEntry,
         onDeleted: () -> Unit
     ) {
-        AlertDialog.Builder(activity)
-            .setTitle("Delete recording?")
-            .setMessage(
-                "${entry.displayName}\n\nThis removes the whole route and its " +
-                    "videos from the comma. This cannot be undone."
-            )
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Delete") { _, _ ->
-                Thread {
-                    val (code, resp) = sg.postRecordingsAction(
-                        RecordingEntry.deletePayload(entry.routeId)
-                    )
-                    val saved = code in 200..299 && resp?.optBoolean("saved", false) == true
-                    activity.runOnUiThread {
-                        if (activity.isFinishing) return@runOnUiThread
-                        if (saved) {
-                            Toast.makeText(
-                                activity,
-                                "Deleted ${entry.displayName}",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                            onDeleted()
-                        } else {
-                            val err = resp?.optString("error", "")?.ifEmpty { null }
-                            Toast.makeText(
-                                activity,
-                                "Delete failed — ${err ?: "HTTP $code"}",
-                                Toast.LENGTH_LONG
-                            ).show()
+        // Addendum 132: an M3 sheet with a danger button.
+        val (dialog, body, pal) = M3Sheet.create(activity, "Delete recording?")
+        val msg = TextView(activity).apply {
+            text = "${entry.displayName}\n\nThis removes the whole route and its " +
+                "videos from the comma. This cannot be undone."
+            textSize = 14f
+            typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+            setTextColor(pal.textPrimary)
+        }
+        body.addView(msg)
+        body.addView(
+            M3Sheet.buttonRow(
+                activity,
+                M3Sheet.tonalButton(activity, pal, "Cancel") { dialog.dismiss() },
+                M3Sheet.dangerButton(activity, pal, "Delete") {
+                    dialog.dismiss()
+                    Thread {
+                        val (code, resp) = sg.postRecordingsAction(
+                            RecordingEntry.deletePayload(entry.routeId)
+                        )
+                        val saved = code in 200..299 && resp?.optBoolean("saved", false) == true
+                        activity.runOnUiThread {
+                            if (activity.isFinishing) return@runOnUiThread
+                            if (saved) {
+                                Toast.makeText(
+                                    activity,
+                                    "Deleted ${entry.displayName}",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                onDeleted()
+                            } else {
+                                val err = resp?.optString("error", "")?.ifEmpty { null }
+                                Toast.makeText(
+                                    activity,
+                                    "Delete failed — ${err ?: "HTTP $code"}",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
                         }
-                    }
-                }.start()
-            }
-            .show()
+                    }.start()
+                }
+            )
+        )
+        dialog.show()
     }
 }

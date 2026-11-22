@@ -86,6 +86,9 @@ class MainActivity : Activity() {
     // destination the save dialog will start from.
     private var droppedPinMarker: Marker? = null
     private var droppedPinCard: LinearLayout? = null
+    // Addendum 133: last reported bottom-dock footprint, so the
+    // dropped-pin card can ride above the dock stack.
+    private var bottomDockFootprintPx = 0
     private var droppedPinLabel: TextView? = null
     private var droppedPinDest: NavDestination? = null
     private val altRouteMarkers = mutableListOf<Marker>()
@@ -125,7 +128,6 @@ class MainActivity : Activity() {
     private lateinit var driveSummaryCard: DriveSummaryView
     private lateinit var lastDriveCard: LastDriveCardView
     private var lastDriveCardShown: Boolean = false
-    private lateinit var aaScreenView: AndroidAutoScreenView
     private var latestPacket: TelemetryPacket? = null
     private var isRealMapStyleLoaded: Boolean = false
 
@@ -214,20 +216,6 @@ class MainActivity : Activity() {
         arrivalCard = ArrivalCardView(this, onDoneClick = { arrivalCard.hide() })
         driveSummaryCard = DriveSummaryView(this, onDoneClick = { driveSummaryCard.hide() })
         lastDriveCard = LastDriveCardView(this, onDismissClick = { lastDriveCard.hide() })
-        aaScreenView = AndroidAutoScreenView(
-            this,
-            onEndNavClick = {
-                endRouteByUser {
-                    aaScreenView.visibility = android.view.View.GONE
-                }
-            },
-            onCloseClick = {
-                aaScreenView.visibility = android.view.View.GONE
-            },
-            onToggleSimClick = {
-                toggleSimulation()
-            }
-        )
         hud = HudOverlay(this,
             onStatusClick = { dialogs.showConnectionModeDialog(client) { updateStatus() } },
             onSettingsClick = {
@@ -238,12 +226,10 @@ class MainActivity : Activity() {
                     { updateStatus() },
                     { hud.updateVoltage(it) },
                     { applyCurrentTheme() },
-                    { toggleSimulation() },
-                    { toggleAndroidAutoScreen() }
+                    { toggleSimulation() }
                 )
             },
             onSimClick = { toggleSimulation() },
-            onAAScreenClick = { toggleAndroidAutoScreen() },
             onAltRoutesClick = { toggleRoutesOverview() },
             onRecenterClick = { recenterToVehicle() },
             onSpeedCardClick = { recenterToVehicle() },
@@ -1086,7 +1072,6 @@ class MainActivity : Activity() {
         hud.updateGpu(GpuStatus.parse(NavStateManager.lastSystemMonitor))
         turnBanner.update(pkt.nav, activeDestination)
         updateTripInfo(activeDestination, pkt)
-        aaScreenView.update(pkt)
         if (!pkt.mapboxToken.isNullOrBlank()) {
             try {
                 if (MapLibre.getApiKey() != pkt.mapboxToken) {
@@ -1203,16 +1188,6 @@ class MainActivity : Activity() {
         updateStatus()
     }
 
-    private fun toggleAndroidAutoScreen() {
-        if (aaScreenView.visibility == android.view.View.VISIBLE) {
-            aaScreenView.visibility = android.view.View.GONE
-        } else {
-            aaScreenView.bringToFront()
-            aaScreenView.visibility = android.view.View.VISIBLE
-            latestPacket?.let { aaScreenView.update(it) }
-        }
-    }
-
     private fun toggleNorthUp() {
         val map = mapLibreMap ?: return
         isNorthUp = !isNorthUp
@@ -1252,34 +1227,10 @@ class MainActivity : Activity() {
             val padV = (110 * resources.displayMetrics.density).roundToInt()
             map.animateCamera(CameraUpdateFactory.newLatLngBounds(builder.build(), padH, padV, padH, padV), 700)
             if (activeRoutes.isNotEmpty()) hud.showRoutes(activeRoutes, selectedRouteId) { selectRoute(it, keepOverviewIfActive = true) }
-            // Route picker (Feature 7): with more than one route, offer the
-            // list picker on top of the overview; a single route keeps the
-            // plain overview behavior.
-            if (activeRoutes.size > 1) showRoutesPicker()
+            // No route picker popup (Param, 2026-11-21): the overview zooms
+            // out to the entire route and the user selects by tapping a
+            // route chip or an alternative-route marker on the map.
         } else { recenterToVehicle() }
-    }
-
-    /**
-     * Route alternatives picker (Feature 7): one row per comma route with
-     * its device-provided totals. A tap runs the existing selectRoute
-     * path; the picker closes only when the comma confirms the selection
-     * — on failure it stays open and selectRoute's error toast shows,
-     * the same discipline as the End Route flow.
-     */
-    private fun showRoutesPicker() {
-        val routes = NavStateManager.activeRoutes.ifEmpty { activeRoutes }
-        if (routes.size <= 1) return
-        val labels = routes.map { RouteRow.label(it, it.id == selectedRouteId) }.toTypedArray()
-        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Choose route")
-            .setItems(labels) { dialog, which ->
-                val chosen = routes[which]
-                selectRoute(chosen, keepOverviewIfActive = false, onResult = { ok ->
-                    if (ok) dialog.dismiss()
-                })
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
     }
 
     private var latestSearchQuery: String = ""
@@ -2313,7 +2264,12 @@ class MainActivity : Activity() {
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply {
                     gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                    setMargins(dp(16), 0, dp(16), dp(110))
+                    // Addendum 133: ride above the dock stack when
+                    // it is taller than the authored 110dp margin.
+                    setMargins(
+                        dp(16), 0, dp(16),
+                        maxOf(dp(110), bottomDockFootprintPx + dp(8))
+                    )
                 }
             }
             val label = TextView(this).apply {
@@ -2689,51 +2645,49 @@ class MainActivity : Activity() {
         val density = resources.displayMetrics.density
         fun dp(v: Int) = (v * density).roundToInt()
 
+        // Addendum 133: an M3 sheet (M3Sheet), like the Settings screens.
+        val (dialog, sheetBody, pal) = M3Sheet.create(
+            this,
+            if (isAlreadyStarred) "Edit saved place" else "Save place",
+            dest.placeName.ifEmpty {
+                "%.4f, %.4f".format(dest.latitude, dest.longitude)
+            }
+        )
         val input = android.widget.EditText(this).apply {
             setText(dest.name)
             selectAll()
-            setTextColor(Color.WHITE)
-            setHintTextColor(0xFF64748B.toInt())
+            setTextColor(pal.textPrimary)
+            setHintTextColor(pal.textSecondary)
             hint = "Enter name (e.g. Gym, Mom's House)"
             textSize = 14f
             setPadding(dp(14), dp(10), dp(14), dp(10))
-            background = HudOverlay.makeCardBg(this@MainActivity, HudOverlay.COLOR_SURFACE_LIGHT, 8, HudOverlay.COLOR_BORDER, 1)
+            background = HudOverlay.makeCardBg(
+                this@MainActivity, pal.inputBg, 8, pal.border, 1
+            )
         }
-
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(10), dp(20), dp(10))
-            val sub = TextView(this@MainActivity).apply {
-                text = dest.placeName.ifEmpty { "%.4f, %.4f".format(dest.latitude, dest.longitude) }
-                textSize = 12f
-                setTextColor(HudOverlay.COLOR_TEXT_MUTED)
-                setPadding(0, 0, 0, dp(10))
-            }
-            addView(sub)
-            addView(input)
-        }
-
-        val builder = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle(if (isAlreadyStarred) "Edit saved place" else "Save place")
-            .setView(container as View)
-            .setPositiveButton("Save") { _: DialogInterface, _: Int ->
-                val name = input.text.toString().trim().ifEmpty { dest.name }
-                val savedDest = dest.copy(name = name)
-                Bookmarks.addStarred(this, savedDest)
-                Toast.makeText(this, "Saved \"$name\"", Toast.LENGTH_SHORT).show()
-                topBar.refreshSuggestions()
-            }
-            .setNegativeButton("Cancel", null)
-
+        sheetBody.addView(input)
+        val buttons = mutableListOf<TextView>()
         if (isAlreadyStarred) {
-            builder.setNeutralButton("Remove") { _: DialogInterface, _: Int ->
+            buttons += M3Sheet.dangerButton(this, pal, "Remove") {
                 Bookmarks.removeStarred(this, dest)
-                Toast.makeText(this, "Removed from saved places", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    this, "Removed from saved places", Toast.LENGTH_SHORT
+                ).show()
                 topBar.refreshSuggestions()
+                dialog.dismiss()
             }
         }
-
-        builder.show()
+        buttons += M3Sheet.tonalButton(this, pal, "Cancel") { dialog.dismiss() }
+        buttons += M3Sheet.primaryButton(this, pal, "Save") {
+            val name = input.text.toString().trim().ifEmpty { dest.name }
+            val savedDest = dest.copy(name = name)
+            Bookmarks.addStarred(this, savedDest)
+            Toast.makeText(this, "Saved \"$name\"", Toast.LENGTH_SHORT).show()
+            topBar.refreshSuggestions()
+            dialog.dismiss()
+        }
+        sheetBody.addView(M3Sheet.buttonRow(this, *buttons.toTypedArray()))
+        dialog.show()
     }
 
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
@@ -2933,10 +2887,46 @@ class MainActivity : Activity() {
         root.addView(bottomDock)
         tripInfoBar.attachTo(bottomDock); arrivalCard.attachTo(bottomDock); driveSummaryCard.attachTo(bottomDock); lastDriveCard.attachTo(bottomDock)
         bottomDock.viewTreeObserver.addOnGlobalLayoutListener {
-            hud.setBottomStackHeight(bottomDock.height)
+            val lp = bottomDock.layoutParams as? FrameLayout.LayoutParams
+            val footprint = if (bottomDock.height > 0) bottomDock.height + (lp?.bottomMargin ?: 0) else 0
+            bottomDockFootprintPx = footprint
+            hud.setBottomStackHeight(footprint)
+            // Addendum 133: keep the dropped-pin card above the dock
+            // stack — its authored 110dp margin slides under a
+            // two-card stack.
+            droppedPinCard?.let { card ->
+                val clp = card.layoutParams as? FrameLayout.LayoutParams
+                if (clp != null) {
+                    val target = maxOf(dockDp(110), footprint + dockDp(8))
+                    if (clp.bottomMargin != target) {
+                        clp.bottomMargin = target
+                        card.layoutParams = clp
+                    }
+                }
+            }
+        }
+        // Addendum 129: the dock itself must clear the system
+        // navigation bar — at its authored 16dp margin the lowest
+        // card's bottom strip slides behind the nav-bar scrim and
+        // renders dimmed (Param, 2026-11-21, on vc43). The dock's
+        // bottom margin follows the inset, same rule as the HUD
+        // clusters' lift; the layout listener above then reports the
+        // dock's true footprint to the HUD.
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(bottomDock) { v, insets ->
+            val navInset = insets.getInsets(
+                androidx.core.view.WindowInsetsCompat.Type.navigationBars()
+            ).bottom
+            val lp = v.layoutParams as? FrameLayout.LayoutParams
+            if (lp != null) {
+                val target = liftedBottomMargin(dockDp(16), navInset)
+                if (lp.bottomMargin != target) {
+                    lp.bottomMargin = target
+                    v.layoutParams = lp
+                }
+            }
+            insets
         }
         root.addView(createMapPickBanner())
-        root.addView(aaScreenView, FrameLayout.LayoutParams(-1, -1))
 
         val isNight = ThemeManager.isNightMode(this)
         hud.applyTheme(isNight); topBar.applyTheme(isNight); turnBanner.applyTheme(isNight); tripInfoBar.applyTheme(isNight); arrivalCard.applyTheme(isNight); driveSummaryCard.applyTheme(isNight); lastDriveCard.applyTheme(isNight)

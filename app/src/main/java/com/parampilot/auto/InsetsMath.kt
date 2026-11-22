@@ -21,6 +21,28 @@ fun stackedBottomMargin(baseMarginPx: Int, navBarInsetPx: Int, stackClearancePx:
     maxOf(liftedBottomMargin(baseMarginPx, navBarInsetPx), stackClearancePx)
 
 /**
+ * Bottom margin for the Re-center pill (Addendum 132): it is centred
+ * horizontally while the bottom-left cluster (car-state badge +
+ * connection pill) is anchored to the same bottom line, so once a
+ * notification stack lifts both by the same clearance their bands
+ * coincide and the pill covers the connection pill (Param's
+ * screenshot, 2026-11-21). When a stack is present the pill must ride
+ * ABOVE the cluster's bottom row: stack clearance plus the row's
+ * height and a gap ([liftAboveStackPx], supplied by HudOverlay).
+ * With no stack, the plain stacked rule applies.
+ */
+fun recenterBottomMargin(
+    baseMarginPx: Int,
+    navBarInsetPx: Int,
+    stackClearancePx: Int,
+    liftAboveStackPx: Int
+): Int =
+    maxOf(
+        stackedBottomMargin(baseMarginPx, navBarInsetPx, stackClearancePx),
+        if (stackClearancePx > 0) stackClearancePx + liftAboveStackPx else 0
+    )
+
+/**
  * Height cap for a settings sheet's ScrollView: the sheet's own ratio cap,
  * but never more than the height the parent actually offered (the space
  * left after the drag handle, header and paddings). Ignoring a tighter

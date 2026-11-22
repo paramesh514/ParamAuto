@@ -1,7 +1,6 @@
 package com.parampilot.auto
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.app.Dialog
 import android.content.Context
 import android.content.Intent
@@ -174,7 +173,10 @@ class SettingsDialogs(private val activity: Activity) {
                 text = subtitle
                 dpText(13f)
                 setTextColor(pal.textSecondary)
-                setSingleLine(true)
+                // Addendum 133: wrap instead of cutting to one line —
+                // sheet subtitles carry real explanations.
+                setSingleLine(false)
+                maxLines = 3
                 ellipsize = TextUtils.TruncateAt.END
                 setPadding(0, dp(2), 0, 0)
             }
@@ -515,13 +517,15 @@ class SettingsDialogs(private val activity: Activity) {
             return
         }
         rowSwitch(row)?.isChecked = false
-        AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Location permission needed")
-            .setMessage("$featureTitle needs this phone's location.\n\nWhy: $why\n\nParamAuto asks for a permission only when you turn on a feature that needs it. With Phone Data off, no permission is required and the comma is the only data source.")
-            .setNegativeButton("Not now") { _, _ ->
+        showSheetConfirm(
+            title = "Location permission needed",
+            message = "$featureTitle needs this phone's location.\n\nWhy: $why\n\nParamAuto asks for a permission only when you turn on a feature that needs it. With Phone Data off, no permission is required and the comma is the only data source.",
+            negativeLabel = "Not now",
+            positiveLabel = "Continue",
+            onNegative = {
                 Toast.makeText(activity, "$featureTitle stayed off - no permission requested", Toast.LENGTH_SHORT).show()
-            }
-            .setPositiveButton("Continue") { _, _ ->
+            },
+            onPositive = {
                 PermissionFlow.onLocationGranted = {
                     // Re-flip the switch; its listener now finds the
                     // permission granted and applies the setting.
@@ -539,7 +543,7 @@ class SettingsDialogs(private val activity: Activity) {
                     PermissionFlow.REQUEST_LOCATION
                 )
             }
-            .show()
+        )
     }
 
     /**
@@ -553,18 +557,19 @@ class SettingsDialogs(private val activity: Activity) {
             onGranted()
             return
         }
-        AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Bluetooth permission needed")
-            .setMessage("Why: $why\n\nParamAuto asks for a permission only when you use a feature that needs it.")
-            .setNegativeButton("Not now", null)
-            .setPositiveButton("Continue") { _, _ ->
+        showSheetConfirm(
+            title = "Bluetooth permission needed",
+            message = "Why: $why\n\nParamAuto asks for a permission only when you use a feature that needs it.",
+            negativeLabel = "Not now",
+            positiveLabel = "Continue",
+            onPositive = {
                 PermissionFlow.onBluetoothGranted = onGranted
                 PermissionFlow.onBluetoothDenied = {
                     Toast.makeText(activity, "Bluetooth not granted - Bluetooth stays unavailable", Toast.LENGTH_LONG).show()
                 }
                 ActivityCompat.requestPermissions(activity, missing.toTypedArray(), PermissionFlow.REQUEST_BLUETOOTH)
             }
-            .show()
+        )
     }
 
     private fun createPrimaryButton(label: String, pal: M3Palette, onClick: () -> Unit): TextView {
@@ -599,6 +604,121 @@ class SettingsDialogs(private val activity: Activity) {
         }
     }
 
+    private fun createDangerButton(label: String, pal: M3Palette, onClick: () -> Unit): TextView {
+        val btnBg = if (pal.isNight) 0xFFF2B8B5.toInt() else 0xFFB3261E.toInt()
+        val btnFg = if (pal.isNight) 0xFF601410.toInt() else Color.WHITE
+        return TextView(activity).apply {
+            text = label
+            dpText(14f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setTextColor(btnFg)
+            gravity = Gravity.CENTER
+            background = HudOverlay.makeCardBg(activity, btnBg, 22)
+            setPadding(dp(20), dp(11), dp(20), dp(11))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { onClick() }
+        }
+    }
+
+    /**
+     * Addendum 133: an M3-sheet confirmation, replacing the legacy
+     * AlertDialog confirms. Follows the Material 3 dialog spec
+     * (m3.material.io/components/dialogs/specs): supporting text is
+     * body-medium (14sp) in the secondary color, actions are
+     * end-aligned with 8dp between them and 24dp above them.
+     * Either button dismisses the sheet first, then runs its action —
+     * the same order the AlertDialog buttons had.
+     */
+    private fun showSheetConfirm(
+        title: String,
+        message: String?,
+        positiveLabel: String,
+        negativeLabel: String = "Cancel",
+        danger: Boolean = false,
+        content: View? = null,
+        onNegative: (() -> Unit)? = null,
+        onPositive: () -> Unit
+    ) {
+        val (dialog, body, pal) = createM3Dialog(title)
+        if (!message.isNullOrEmpty()) {
+            body.addView(TextView(activity).apply {
+                text = message
+                dpText(14f)
+                setTextColor(pal.textSecondary)
+                setPadding(dp(4), 0, dp(4), 0)
+            })
+        }
+        if (content != null) body.addView(content)
+        val row = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, dp(24), 0, 0) }
+        }
+        row.addView(createTonalButton(negativeLabel, pal) {
+            dialog.dismiss()
+            onNegative?.invoke()
+        })
+        val posBtn = if (danger) {
+            createDangerButton(positiveLabel, pal) {
+                dialog.dismiss()
+                onPositive()
+            }
+        } else {
+            createPrimaryButton(positiveLabel, pal) {
+                dialog.dismiss()
+                onPositive()
+            }
+        }
+        posBtn.layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { setMargins(dp(8), 0, 0, 0) }
+        row.addView(posBtn)
+        body.addView(row)
+        dialog.show()
+    }
+
+    /**
+     * Addendum 133: an M3-sheet single-choice picker, replacing the
+     * legacy setSingleChoiceItems dialogs. The current option is
+     * marked with a check in the accent color; tapping a different
+     * option picks it, tapping the current one just closes.
+     */
+    private fun showSheetListPicker(
+        title: String,
+        options: List<String>,
+        current: String,
+        label: (String) -> String = { it },
+        onPick: (String) -> Unit
+    ) {
+        val (dialog, body, pal) = createM3Dialog(title)
+        for (option in options) {
+            val isCurrent = option == current
+            val row = TextView(activity).apply {
+                text = if (isCurrent) "✓  ${label(option)}" else "     ${label(option)}"
+                dpText(15f)
+                typeface = Typeface.create(
+                    if (isCurrent) "sans-serif-medium" else "sans-serif",
+                    Typeface.NORMAL
+                )
+                setTextColor(if (isCurrent) pal.accentBlue else pal.textPrimary)
+                setPadding(dp(4), dp(13), dp(4), dp(13))
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    dialog.dismiss()
+                    if (!isCurrent) onPick(option)
+                }
+            }
+            body.addView(row)
+        }
+        dialog.show()
+    }
+
     private fun createInputBox(initialText: String, hintText: String, pal: M3Palette, isPassword: Boolean = false): EditText {
         return EditText(activity).apply {
             setText(initialText)
@@ -625,8 +745,7 @@ class SettingsDialogs(private val activity: Activity) {
         onStatusRefresh: () -> Unit,
         onPowerRefresh: (PowerState?) -> Unit,
         onThemeChanged: () -> Unit,
-        onToggleSimulation: () -> Unit,
-        onShowAndroidAutoScreen: () -> Unit
+        onToggleSimulation: () -> Unit
     ) {
         val (dialog, body, pal) = createM3Dialog("Settings")
 
@@ -741,7 +860,7 @@ class SettingsDialogs(private val activity: Activity) {
                         dialog.dismiss()
                         showSettingsMenu(
                             client, onCenterVehicle, onOpenExternalMap, onStatusRefresh,
-                            onPowerRefresh, onThemeChanged, onToggleSimulation, onShowAndroidAutoScreen
+                            onPowerRefresh, onThemeChanged, onToggleSimulation
                         )
                     }
                 }
@@ -912,7 +1031,7 @@ class SettingsDialogs(private val activity: Activity) {
                 pal = pal
             ) {
                 dialog.dismiss()
-                showPhoneDataDialog(client, onThemeChanged, onShowAndroidAutoScreen, onToggleSimulation)
+                showPhoneDataDialog(client, onThemeChanged, onToggleSimulation)
             }
         )
         navCard.addView(createDivider(pal))
@@ -960,21 +1079,6 @@ class SettingsDialogs(private val activity: Activity) {
             ) {
                 dialog.dismiss()
                 showUsageCountersDialog()
-            }
-        )
-        navCard.addView(createDivider(pal))
-
-        navCard.addView(
-            createSettingsRow(
-                iconKind = SettingsIconView.Kind.CAR_DISPLAY,
-                title = "Android Auto preview",
-                subtitle = "Preview head unit navigation screen",
-                iconTint = pal.accentGreen,
-                iconTileBg = pal.accentGreenTonalBg,
-                pal = pal
-            ) {
-                dialog.dismiss()
-                onShowAndroidAutoScreen()
             }
         )
         navCard.addView(createDivider(pal))
@@ -2102,24 +2206,13 @@ class SettingsDialogs(private val activity: Activity) {
             current: String,
             onPick: (String) -> Unit
         ) {
-            AlertDialog.Builder(
-                activity, android.R.style.Theme_DeviceDefault_Dialog_Alert
-            )
-                .setTitle(title)
-                .setSingleChoiceItems(
-                    options.toTypedArray(), options.indexOf(current)
-                ) { d, which ->
-                    d.dismiss()
-                    if (options[which] != current) onPick(options[which])
-                }
-                .setNegativeButton("Cancel", null)
-                .show()
+            showSheetListPicker(title, options, current, onPick = onPick)
         }
 
         fun promptJoin(fixedSsid: String?, hidden: Boolean) {
             val container = LinearLayout(activity).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(dp(20), dp(8), dp(20), 0)
+                setPadding(0, dp(8), 0, 0)
             }
             val ssidInput = if (hidden) {
                 createInputBox("", "Network name (SSID)", pal).also {
@@ -2138,20 +2231,14 @@ class SettingsDialogs(private val activity: Activity) {
                 pal, isPassword = true
             )
             container.addView(passwordInput)
-            AlertDialog.Builder(
-                activity, android.R.style.Theme_DeviceDefault_Dialog_Alert
-            )
-                .setTitle(
-                    if (hidden) "Join hidden network" else "Join $fixedSsid"
-                )
-                .setMessage(
-                    "Joining pauses the Galaxy hotspot for up to 30 " +
-                        "seconds. If your phone is on it, it reconnects " +
-                        "afterwards."
-                )
-                .setView(container)
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Join") { _, _ ->
+            showSheetConfirm(
+                title = if (hidden) "Join hidden network" else "Join $fixedSsid",
+                message = "Joining pauses the Galaxy hotspot for up to 30 " +
+                    "seconds. If your phone is on it, it reconnects " +
+                    "afterwards.",
+                positiveLabel = "Join",
+                content = container,
+                onPositive = {
                     val ssid = if (hidden) {
                         ssidInput?.text?.toString()?.trim() ?: ""
                     } else {
@@ -2173,7 +2260,7 @@ class SettingsDialogs(private val activity: Activity) {
                         )
                     }
                 }
-                .show()
+            )
         }
 
         fun refresh(showLoading: Boolean) {
@@ -3727,20 +3814,13 @@ class SettingsDialogs(private val activity: Activity) {
             question: String?,
             intent: String
         ) {
-            AlertDialog.Builder(
-                activity, android.R.style.Theme_DeviceDefault_Dialog_Alert
+            showSheetConfirm(
+                title = rowLabel,
+                message = question?.ifEmpty { null } ?: "Apply this change?",
+                positiveLabel = "Confirm",
+                onNegative = { currentPage?.let { render(it) } },
+                onPositive = { confirmIntent(intent) }
             )
-                .setTitle(rowLabel)
-                .setMessage(
-                    question?.ifEmpty { null } ?: "Apply this change?"
-                )
-                .setNegativeButton("Cancel") { _, _ ->
-                    currentPage?.let { render(it) }
-                }
-                .setPositiveButton("Confirm") { _, _ ->
-                    confirmIntent(intent)
-                }
-                .show()
         }
 
         fun commitValue(index: Int, value: Any) {
@@ -3814,18 +3894,7 @@ class SettingsDialogs(private val activity: Activity) {
             current: String,
             onPick: (String) -> Unit
         ) {
-            AlertDialog.Builder(
-                activity, android.R.style.Theme_DeviceDefault_Dialog_Alert
-            )
-                .setTitle(title)
-                .setSingleChoiceItems(
-                    options.toTypedArray(), options.indexOf(current)
-                ) { d, which ->
-                    d.dismiss()
-                    if (options[which] != current) onPick(options[which])
-                }
-                .setNegativeButton("Cancel", null)
-                .show()
+            showSheetListPicker(title, options, current, onPick = onPick)
         }
 
         // Galaxy rows carry no icons; these mirror the app's row
@@ -4009,7 +4078,7 @@ class SettingsDialogs(private val activity: Activity) {
             fun promptTyped() {
                 val container = LinearLayout(activity).apply {
                     orientation = LinearLayout.VERTICAL
-                    setPadding(dp(20), dp(8), dp(20), 0)
+                    setPadding(0, dp(8), 0, 0)
                 }
                 val input = createInputBox(
                     if (row.value == "Auto") "" else row.value,
@@ -4019,14 +4088,12 @@ class SettingsDialogs(private val activity: Activity) {
                     android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or
                     android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
                 container.addView(input)
-                AlertDialog.Builder(
-                    activity,
-                    android.R.style.Theme_DeviceDefault_Dialog_Alert
-                )
-                    .setTitle(row.label)
-                    .setView(container)
-                    .setNegativeButton("Cancel", null)
-                    .setPositiveButton("Save") { _, _ ->
+                showSheetConfirm(
+                    title = row.label,
+                    message = null,
+                    positiveLabel = "Save",
+                    content = container,
+                    onPositive = {
                         val text = input.text.toString().trim()
                         when {
                             hasAuto && text.equals("Auto", true) ->
@@ -4052,7 +4119,7 @@ class SettingsDialogs(private val activity: Activity) {
                             }
                         }
                     }
-                    .show()
+                )
             }
 
             val card = createGroupCard(pal)
@@ -4343,18 +4410,7 @@ class SettingsDialogs(private val activity: Activity) {
             label: (String) -> String,
             onPick: (String) -> Unit
         ) {
-            val labels = options.map { label(it) }.toTypedArray()
-            AlertDialog.Builder(
-                activity, android.R.style.Theme_DeviceDefault_Dialog_Alert
-            )
-                .setTitle(title)
-                .setSingleChoiceItems(labels, options.indexOf(current)) { d, which ->
-                    d.dismiss()
-                    val picked = options[which]
-                    if (picked != current) onPick(picked)
-                }
-                .setNegativeButton("Cancel", null)
-                .show()
+            showSheetListPicker(title, options, current, label, onPick)
         }
 
         fun showProviderDropdown(title: String, current: String, onPick: (String) -> Unit) {
@@ -4531,7 +4587,6 @@ class SettingsDialogs(private val activity: Activity) {
     fun showPhoneDataDialog(
         client: CommaClient?,
         onThemeChanged: () -> Unit,
-        onShowAndroidAutoScreen: () -> Unit,
         onToggleSimulation: () -> Unit
     ) {
         val (dialog, body, pal) = createM3Dialog(
@@ -4577,7 +4632,7 @@ class SettingsDialogs(private val activity: Activity) {
             subtitle = "Why: phone GPS speed fills the readout when the comma provides none. Needs Location permission - asked only if you turn this on.",
             initialChecked = NavStateManager.usePhoneSpeed,
             pal = pal,
-            subtitleMaxLines = 3
+            subtitleMaxLines = 6
         ) { enabled ->
             if (enabled) {
                 gateLocationToggle(speedRow, "Use phone speed", "phone GPS speed fills the speed readout when the comma provides none.") {
@@ -4598,7 +4653,7 @@ class SettingsDialogs(private val activity: Activity) {
             subtitle = "Why: phone GPS positions the map when the comma has no fix. Needs Location permission - asked only if you turn this on.",
             initialChecked = NavStateManager.usePhoneLocation,
             pal = pal,
-            subtitleMaxLines = 3
+            subtitleMaxLines = 6
         ) { enabled ->
             if (enabled) {
                 gateLocationToggle(locationRow, "Use phone location", "phone GPS positions the map when the comma has no fix.") {
@@ -4619,7 +4674,7 @@ class SettingsDialogs(private val activity: Activity) {
             subtitle = "Why: sends phone GPS to the comma while you set a destination, so routing starts from where you are. Needs Location permission - asked only if you turn this on.",
             initialChecked = NavStateManager.usePhoneLocationToComma,
             pal = pal,
-            subtitleMaxLines = 3
+            subtitleMaxLines = 6
         ) { enabled ->
             if (enabled) {
                 gateLocationToggle(toCommaRow, "Phone location to Comma", "it sends phone GPS to the comma while you set a destination, so routing starts from where you are.") {
@@ -4640,7 +4695,7 @@ class SettingsDialogs(private val activity: Activity) {
             subtitle = "Why: uses the Mapbox key saved in this app for map tiles. No system permission needed.",
             initialChecked = NavStateManager.usePhoneMapboxKey,
             pal = pal,
-            subtitleMaxLines = 3
+            subtitleMaxLines = 6
         ) { enabled ->
             val hasToken = !(client?.mapboxToken ?: NavStateManager.mapboxToken).isNullOrBlank()
             if (enabled && !hasToken) {
@@ -4663,7 +4718,7 @@ class SettingsDialogs(private val activity: Activity) {
             subtitle = "Why: uses the Google API key saved in this app for Google phone maps, Google search and Google speed limits. No system permission needed.",
             initialChecked = NavStateManager.usePhoneGoogleKey,
             pal = pal,
-            subtitleMaxLines = 3
+            subtitleMaxLines = 6
         ) { enabled ->
             val hasKey = !(client?.googleApiKey ?: NavStateManager.googleApiKey)
                 .isNullOrBlank()
@@ -4690,7 +4745,7 @@ class SettingsDialogs(private val activity: Activity) {
             subtitle = "Why: live traffic colors on Mapbox maps (phone + Auto). Needs your Mapbox key - no system permission needed.",
             initialChecked = NavStateManager.usePhoneTraffic,
             pal = pal,
-            subtitleMaxLines = 3
+            subtitleMaxLines = 6
         ) { enabled ->
             val hasToken = !(client?.mapboxToken ?: NavStateManager.mapboxToken).isNullOrBlank()
             if (enabled && !hasToken) {
@@ -4711,7 +4766,7 @@ class SettingsDialogs(private val activity: Activity) {
             subtitle = "Why: shows the limit from Mapbox route data, because the comma doesn't share its own. No system permission needed.",
             initialChecked = NavStateManager.usePhoneSpeedLimit,
             pal = pal,
-            subtitleMaxLines = 3
+            subtitleMaxLines = 6
         ) { enabled ->
             val hasToken = !(client?.mapboxToken ?: NavStateManager.mapboxToken).isNullOrBlank()
             if (enabled && !hasToken) {
@@ -4732,7 +4787,7 @@ class SettingsDialogs(private val activity: Activity) {
             subtitle = "Why: draws traffic-light markers along the route from Mapbox map data (locations only - no live red/green state). Needs your Mapbox key - no system permission needed.",
             initialChecked = NavStateManager.usePhoneSignals,
             pal = pal,
-            subtitleMaxLines = 3
+            subtitleMaxLines = 6
         ) { enabled ->
             val hasToken = !(client?.mapboxToken ?: NavStateManager.mapboxToken).isNullOrBlank()
             if (enabled && !hasToken) {
@@ -4765,7 +4820,7 @@ class SettingsDialogs(private val activity: Activity) {
                 subtitle = "Why: derives turn steps from the comma's route on this phone - off shows only the comma's own maneuvers. No system permission needed.",
                 initialChecked = NavStateManager.usePhoneRoute,
                 pal = pal,
-                subtitleMaxLines = 3
+                subtitleMaxLines = 6
             ) { enabled ->
                 client?.setUsePhoneRoute(enabled)
             }
@@ -4778,7 +4833,7 @@ class SettingsDialogs(private val activity: Activity) {
                 subtitle = "Why: searches Mapbox/OSM from the phone - off searches on the comma only. No system permission needed.",
                 initialChecked = NavStateManager.usePhoneSearch,
                 pal = pal,
-                subtitleMaxLines = 3
+                subtitleMaxLines = 6
             ) { enabled ->
                 client?.setUsePhoneSearch(enabled)
             }
@@ -5031,11 +5086,11 @@ class SettingsDialogs(private val activity: Activity) {
                                             return@createSettingsRow
                                         }
                                         val sizeText = if (sizeMb > 0) " ($sizeMb MB)" else ""
-                                        AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                                            .setTitle("Download model")
-                                            .setMessage("Download ${m.label}$sizeText to the comma now?")
-                                            .setNegativeButton("Cancel", null)
-                                            .setPositiveButton("Download") { _, _ ->
+                                        showSheetConfirm(
+                                            title = "Download model",
+                                            message = "Download ${m.label}$sizeText to the comma now?",
+                                            positiveLabel = "Download",
+                                            onPositive = {
                                                 Thread {
                                                     val res = repo.downloadModel(m.value, if (isParked) "parked" else null)
                                                     activity.runOnUiThread {
@@ -5049,7 +5104,7 @@ class SettingsDialogs(private val activity: Activity) {
                                                     }
                                                 }.start()
                                             }
-                                            .show()
+                                        )
                                     }
                                     m.installed && m.selectable -> {
                                         if (!isParked) {
@@ -5141,11 +5196,12 @@ class SettingsDialogs(private val activity: Activity) {
                         Toast.makeText(activity, "Shift into Park to delete models", Toast.LENGTH_SHORT).show()
                         return@createSettingsRow
                     }
-                    AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                        .setTitle("Delete model")
-                        .setMessage("Delete ${m.label} from the comma? You can download it again later.")
-                        .setNegativeButton("Cancel", null)
-                        .setPositiveButton("Delete") { _, _ ->
+                    showSheetConfirm(
+                        title = "Delete model",
+                        message = "Delete ${m.label} from the comma? You can download it again later.",
+                        positiveLabel = "Delete",
+                        danger = true,
+                        onPositive = {
                             Thread {
                                 val res = repo.deleteModel(m.value, if (isParked) "parked" else null)
                                 activity.runOnUiThread {
@@ -5159,7 +5215,7 @@ class SettingsDialogs(private val activity: Activity) {
                                 }
                             }.start()
                         }
-                        .show()
+                    )
                 }
             )
         }
@@ -5314,14 +5370,15 @@ class SettingsDialogs(private val activity: Activity) {
                             ).show()
                         } else {
                             val target = !current
-                            AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                                .setTitle("Download updates automatically")
-                                .setMessage(
-                                    if (target) "The comma will download new Dom builds as they appear and mark them ready to install."
-                                    else "The comma will only download updates when you check manually."
-                                )
-                                .setNegativeButton("Cancel", null)
-                                .setPositiveButton(if (target) "Turn on" else "Turn off") { _, _ ->
+                            showSheetConfirm(
+                                title = "Download updates automatically",
+                                message = if (target) {
+                                    "The comma will download new Dom builds as they appear and mark them ready to install."
+                                } else {
+                                    "The comma will only download updates when you check manually."
+                                },
+                                positiveLabel = if (target) "Turn on" else "Turn off",
+                                onPositive = {
                                     dialog.dismiss()
                                     Thread {
                                         val (code, resp) = updater.postPreferences(target)
@@ -5341,7 +5398,7 @@ class SettingsDialogs(private val activity: Activity) {
                                         }
                                     }.start()
                                 }
-                                .show()
+                            )
                         }
                     }
                 )
@@ -5377,11 +5434,11 @@ class SettingsDialogs(private val activity: Activity) {
 
                 if (status.updateAvailable && !status.updateReady) {
                     val downloadBtn = createTonalButton("Download update", pal) {
-                        AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                            .setTitle("Download update")
-                            .setMessage("Download the update for branch $actionBranch now?")
-                            .setNegativeButton("Cancel", null)
-                            .setPositiveButton("Download") { _, _ ->
+                        showSheetConfirm(
+                            title = "Download update",
+                            message = "Download the update for branch $actionBranch now?",
+                            positiveLabel = "Download",
+                            onPositive = {
                                 dialog.dismiss()
                                 Thread {
                                     val (code, resp) = updater.postAction("download", actionBranch.ifEmpty { null })
@@ -5395,7 +5452,7 @@ class SettingsDialogs(private val activity: Activity) {
                                     }
                                 }.start()
                             }
-                            .show()
+                        )
                     }.apply {
                         layoutParams = LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -5407,11 +5464,11 @@ class SettingsDialogs(private val activity: Activity) {
 
                 if (status.updateReady) {
                     val installBtn = createTonalButton("Install update", pal) {
-                        AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                            .setTitle("Install update")
-                            .setMessage("Install the downloaded update now? The comma will reboot and driving assistance will be unavailable until it restarts. The car must be parked.")
-                            .setNegativeButton("Cancel", null)
-                            .setPositiveButton("Install") { _, _ ->
+                        showSheetConfirm(
+                            title = "Install update",
+                            message = "Install the downloaded update now? The comma will reboot and driving assistance will be unavailable until it restarts. The car must be parked.",
+                            positiveLabel = "Install",
+                            onPositive = {
                                 // Addendum 126: record the intent FIRST, so
                                 // the install keeps retrying (and survives
                                 // an app restart) until the comma finishes
@@ -5455,7 +5512,7 @@ class SettingsDialogs(private val activity: Activity) {
                                     }
                                 }.start()
                             }
-                            .show()
+                        )
                     }.apply {
                         layoutParams = LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -5466,11 +5523,11 @@ class SettingsDialogs(private val activity: Activity) {
                 }
 
                 val rebootBtn = createTonalButton("Reboot comma", pal) {
-                    AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                        .setTitle("Reboot comma")
-                        .setMessage("Reboot the comma now? It must be parked.")
-                        .setNegativeButton("Cancel", null)
-                        .setPositiveButton("Reboot") { _, _ ->
+                    showSheetConfirm(
+                        title = "Reboot comma",
+                        message = "Reboot the comma now? It must be parked.",
+                        positiveLabel = "Reboot",
+                        onPositive = {
                             dialog.dismiss()
                             Thread {
                                 val parked = SettingsRepository(SgGalaxyClient(baseUrl)).isVehicleParked(null)
@@ -5490,7 +5547,7 @@ class SettingsDialogs(private val activity: Activity) {
                                 }
                             }.start()
                         }
-                        .show()
+                    )
                 }.apply {
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
@@ -5636,7 +5693,6 @@ class SettingsIconView(
         TUNE,
         SPARK,
         SPEED,
-        CAR_DISPLAY,
         NAVIGATION,
         MAP,
         STORAGE,
@@ -5728,11 +5784,6 @@ class SettingsIconView(
                 val arc = RectF(cx - s * 0.9f, cy - s * 0.75f, cx + s * 0.9f, cy + s * 1.05f)
                 canvas.drawArc(arc, 165f, 210f, false, strokePaint)
                 canvas.drawLine(cx, cy + s * 0.2f, cx + s * 0.48f, cy - s * 0.28f, strokePaint)
-            }
-            Kind.CAR_DISPLAY -> {
-                val screen = RectF(cx - s * 0.9f, cy - s * 0.65f, cx + s * 0.9f, cy + s * 0.55f)
-                canvas.drawRoundRect(screen, 3f * density, 3f * density, strokePaint)
-                canvas.drawLine(cx - s * 0.35f, cy + s * 0.85f, cx + s * 0.35f, cy + s * 0.85f, strokePaint)
             }
             Kind.NAVIGATION -> {
                 val path = Path().apply {

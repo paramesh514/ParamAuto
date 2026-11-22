@@ -1,13 +1,8 @@
 package com.parampilot.auto
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.Intent
-import android.graphics.Color
 import android.graphics.Typeface
-import android.view.ViewGroup
-import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import org.json.JSONObject
@@ -27,35 +22,11 @@ import kotlin.math.roundToInt
 object HealthDialog {
 
     fun show(activity: Activity, client: CommaClient?) {
-        val den = activity.resources.displayMetrics.density
-        fun dp(v: Int) = (v * den).roundToInt()
+        // Addendum 132: an M3 sheet (M3Sheet), like the Settings screens.
+        val (dialog, body, pal) = M3Sheet.create(activity, "Comma health & caches")
 
-        val body = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            background = HudOverlay.makeCardBg(activity, HudOverlay.COLOR_SURFACE_DARK, 0)
-            setPadding(dp(20), dp(16), dp(20), dp(16))
-        }
-
-        fun addRow(label: String, value: String) {
-            val rowLabel = TextView(activity).apply {
-                text = label
-                textSize = 12f
-                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-                setTextColor(HudOverlay.COLOR_TEXT_MUTED)
-                setPadding(0, dp(10), 0, 0)
-            }
-            body.addView(rowLabel)
-            val rowValue = TextView(activity).apply {
-                text = value
-                textSize = 15f
-                typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-                setTextColor(Color.WHITE)
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-                )
-            }
-            body.addView(rowValue)
-        }
+        fun addRow(label: String, value: String) =
+            M3Sheet.addRow(body, activity, pal, label, value)
 
         val endpoint = client?.commaIp ?: NavStateManager.commaIp
         addRow(
@@ -134,49 +105,51 @@ object HealthDialog {
         // Active driving model (Feature 15).
         addRow("Driving model", NavStateManager.activeModelName ?: "—")
 
-        val scroll = ScrollView(activity).apply { addView(body) }
-        AlertDialog.Builder(activity)
-            .setTitle("Comma health & caches")
-            .setView(scroll)
-            .setPositiveButton("Done", null)
-            .setNeutralButton("View log") { _, _ -> showJournal(activity) }
-            .show()
+        body.addView(
+            M3Sheet.buttonRow(
+                activity,
+                M3Sheet.tonalButton(activity, pal, "View log") { showJournal(activity) },
+                M3Sheet.primaryButton(activity, pal, "Done") { dialog.dismiss() }
+            )
+        )
+        dialog.show()
     }
 
     /** The connection journal viewer: recent events, share, clear. */
     private fun showJournal(activity: Activity) {
-        val den = activity.resources.displayMetrics.density
-        fun dp(v: Int) = (v * den).roundToInt()
+        val (dialog, body, pal) = M3Sheet.create(activity, "Connection log")
         val tv = TextView(activity).apply {
             text = ConnectionJournal.recentText()
                 .ifEmpty { "No connection events recorded yet." }
             textSize = 11f
             typeface = Typeface.MONOSPACE
-            setTextColor(Color.WHITE)
-            setPadding(dp(16), dp(12), dp(16), dp(12))
+            setTextColor(pal.textPrimary)
         }
-        val scroll = ScrollView(activity).apply { addView(tv) }
-        AlertDialog.Builder(activity)
-            .setTitle("Connection log")
-            .setView(scroll)
-            .setPositiveButton("Share") { _, _ ->
-                val intent = Intent(Intent.ACTION_SEND).apply {
-                    type = "text/plain"
-                    putExtra(Intent.EXTRA_SUBJECT, "ParamAuto connection log")
-                    putExtra(Intent.EXTRA_TEXT, ConnectionJournal.recentText())
+        body.addView(tv)
+        body.addView(
+            M3Sheet.buttonRow(
+                activity,
+                M3Sheet.tonalButton(activity, pal, "Clear") {
+                    ConnectionJournal.clear()
+                    Toast.makeText(
+                        activity, "Connection log cleared", Toast.LENGTH_SHORT
+                    ).show()
+                    dialog.dismiss()
+                },
+                M3Sheet.primaryButton(activity, pal, "Share") {
+                    val intent = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_SUBJECT, "ParamAuto connection log")
+                        putExtra(Intent.EXTRA_TEXT, ConnectionJournal.recentText())
+                    }
+                    activity.startActivity(
+                        Intent.createChooser(intent, "Share connection log")
+                    )
+                    dialog.dismiss()
                 }
-                activity.startActivity(
-                    Intent.createChooser(intent, "Share connection log")
-                )
-            }
-            .setNeutralButton("Clear") { _, _ ->
-                ConnectionJournal.clear()
-                Toast.makeText(
-                    activity, "Connection log cleared", Toast.LENGTH_SHORT
-                ).show()
-            }
-            .setNegativeButton("Close", null)
-            .show()
+            )
+        )
+        dialog.show()
     }
 }
 
