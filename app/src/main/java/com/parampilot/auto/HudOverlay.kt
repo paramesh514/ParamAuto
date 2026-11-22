@@ -96,6 +96,10 @@ class HudOverlay(
      * 2026-11-20: no separate update pill). */
     private var updateReady: Boolean = false
 
+    /** Addendum 126: a user-confirmed install is pending; the badge
+     * shows "Updating…" until the comma finishes it. */
+    private var updatePending: Boolean = false
+
     /** Last device state passed to updateDeviceState, for badge re-renders. */
     private var lastDeviceState: String? = null
 
@@ -865,6 +869,12 @@ class HudOverlay(
         renderDeviceStateBadge()
     }
 
+    /** Addendum 126: a user-confirmed install is pending. */
+    fun setUpdatePending(pending: Boolean) {
+        updatePending = pending
+        renderDeviceStateBadge()
+    }
+
 
 
     fun setSpeedLimitSource(source: String?, speedLimitMs: Double) {
@@ -1121,6 +1131,22 @@ class HudOverlay(
     private fun renderDeviceStateBadge() {
 
         if (!::deviceStateBadge.isInitialized) return
+
+        if (updatePending) {
+
+            deviceStateBadge.text = "⬆️ Updating…"
+
+            deviceStateBadge.setTextColor(COLOR_ACCENT_AMBER)
+
+            deviceStateBadge.background = makeCardBg(context, COLOR_BADGE_AMBER_BG, 14, COLOR_ACCENT_AMBER, 1)
+
+            deviceStateBadge.visibility = View.VISIBLE
+
+            deviceStateBadge.setOnClickListener { onUpdateBadgeClick?.invoke() }
+
+            return
+
+        }
 
         if (updateReady) {
 

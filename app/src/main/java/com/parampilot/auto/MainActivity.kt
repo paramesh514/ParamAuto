@@ -193,6 +193,9 @@ class MainActivity : Activity() {
 
         NavStateManager.appContext = applicationContext
         dialogs = SettingsDialogs(this)
+        // Addendum 126: restore a pending comma software install so the
+        // badge shows "Updating…" from the first frame after a restart.
+        NavStateManager.softwareUpdatePending = SoftwareUpdateIntentStore.load(this) != null
         topBar = TopSearchBar(
             this,
             onSearchQuery = { searchDestinations(it) },
@@ -1055,6 +1058,11 @@ class MainActivity : Activity() {
         hud.updateVoltage(NavStateManager.latestPower)
         hud.updateGpu(GpuStatus.parse(NavStateManager.lastSystemMonitor))
         hud.setUpdateReady(NavStateManager.softwareUpdateReady)
+        hud.setUpdatePending(NavStateManager.softwareUpdatePending)
+        NavStateManager.softwareUpdateCompletionNote?.let { note ->
+            NavStateManager.softwareUpdateCompletionNote = null
+            Toast.makeText(this, note, Toast.LENGTH_LONG).show()
+        }
         maybeShowLastDriveCard()
         checkAndApplyMapStyle()
     }

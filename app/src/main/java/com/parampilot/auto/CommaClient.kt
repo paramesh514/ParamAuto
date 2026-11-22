@@ -2097,6 +2097,21 @@ class CommaClient(private val context: Context) {
                 lastSgDeviceState = state
             }
 
+            if (NavStateManager.softwareUpdatePending) {
+                // Addendum 126 quiet mode (Param, 2026-11-21: "When
+                // updating state active don't send any requests other
+                // then connectivity checks"): the heartbeat above is
+                // the only traffic while an install is pending. Keep
+                // the device state fresh from it, run the install
+                // engine off it, and skip everything else in this poll
+                // (monitor, offsets, slow poll, route, telemetry).
+                if (state != null) {
+                    NavStateManager.setDeviceState(state)
+                }
+                runPendingSoftwareInstall(client, deviceState)
+                return null
+            }
+
             // Extract battery voltage from /api/system/monitor (primary) and /api/device/state (fallback)
             val monitor = client.fetchSystemMonitor()
             // Keep the raw payload for the health screen (Feature 4): it
@@ -2211,6 +2226,57 @@ class CommaClient(private val context: Context) {
             }
         } catch (e: Exception) {
             Log.w(TAG, "Slow poll active model failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Addendum 126: the pending-install engine, run once per heartbeat
+     * from fetchSgTelemetry's quiet branch. Quiet mode allows no
+     * requests beyond the connectivity check, so everything here is
+     * driven by the heartbeat result alone: retry the install POST
+     * while the comma answers and the car is parked; read completion
+     * from the reboot cycle (accepted → heartbeat lost → heartbeat
+     * back). The intent is persisted (SoftwareUpdateIntentStore), so
+     * it survives app restarts; decisions are SoftwareUpdatePlan's.
+     */
+    private fun runPendingSoftwareInstall(client: SgGalaxyClient, deviceState: JSONObject?) {
+        try {
+            var pending = SoftwareUpdateIntentStore.load(context)
+            if (pending == null) {
+                NavStateManager.softwareUpdatePending = false
+                return
+            }
+            NavStateManager.softwareUpdatePending = true
+            val heartbeatUp = deviceState != null
+            // Record the comma going down after an accepted install:
+            // its return is the completion signal.
+            if (!heartbeatUp && pending.acceptedAtMs > 0L && !pending.commaWentDown) {
+                pending = pending.copy(commaWentDown = true)
+                SoftwareUpdateIntentStore.save(context, pending)
+            }
+            val parked = deviceState?.optString("state", "")?.trim()
+                ?.equals("parked", ignoreCase = true) == true
+            val now = System.currentTimeMillis()
+            when (SoftwareUpdatePlan.evaluate(pending, heartbeatUp, parked, now)) {
+                SoftwareUpdatePlan.Decision.ATTEMPT -> {
+                    val (code, _) = CommaSoftwareUpdate(client).postAction(
+                        "install", pending.branch.ifEmpty { null }
+                    )
+                    val attempted = pending.copy(lastAttemptMs = now)
+                    SoftwareUpdateIntentStore.save(
+                        context,
+                        if (code in 200..299) attempted.copy(acceptedAtMs = now) else attempted
+                    )
+                }
+                SoftwareUpdatePlan.Decision.COMPLETED -> {
+                    SoftwareUpdateIntentStore.clear(context)
+                    NavStateManager.softwareUpdatePending = false
+                    NavStateManager.softwareUpdateCompletionNote = "Comma software updated"
+                }
+                else -> Unit
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Pending software install failed: ${e.message}")
         }
     }
 

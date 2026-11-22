@@ -344,6 +344,14 @@ object NavStateManager {
     @Volatile
     var softwareUpdateLabel: String? = null
 
+    /** True while a user-confirmed install is pending (Addendum 126). */
+    @Volatile
+    var softwareUpdatePending: Boolean = false
+
+    /** One-shot note about a finished pending install; the UI toasts and clears it. */
+    @Volatile
+    var softwareUpdateCompletionNote: String? = null
+
     /** Active driving model display name (Feature 15); null while unknown. */
     @Volatile
     var activeModelName: String? = null
