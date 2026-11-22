@@ -56,6 +56,12 @@ class ModelManagerRepository(private val client: SgGalaxyClient) {
         ActiveModel.actives(lastManagerJson)
 
     /**
+     * The model download currently running on the comma, from the most
+     * recent manager fetch (Addendum 135); null when none is running.
+     */
+    fun getDownloadState(): ModelDownloadState? = ModelDownload.parse(lastManagerJson)
+
+    /**
      * Parses every model entry from /api/models/manager, keeping only entries
      * with a non-empty model id, in the device's own order.
      */

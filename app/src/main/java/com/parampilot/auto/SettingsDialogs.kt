@@ -4979,6 +4979,7 @@ class SettingsDialogs(private val activity: Activity) {
             val allModels = repo.getAllModels()
             val activeModel = repo.getActiveModel()
             val actives = repo.getManagerActives()
+            val downloadState = repo.getDownloadState()
             val soundPacks = repo.getSoundPacks()
             // The Active badge needs a row to land on: if an active pick
             // (e.g. the built-in default) is filtered out of the installed
@@ -5002,6 +5003,38 @@ class SettingsDialogs(private val activity: Activity) {
                     "Driving models",
                     "Active: $activeLabel · ${if (isParked) "Parked" else "Locked while driving"}"
                 )
+
+                // Addendum 135: a model download running on the comma
+                // gets a live banner at the top — until now the app
+                // never read the manager payload's download fields, so
+                // a download in progress looked like nothing was
+                // happening. The value is refreshed every 3 s while
+                // the sheet stays open (see the loop after show()).
+                var downloadValueView: TextView? = null
+                if (downloadState != null) {
+                    val dlCard = createGroupCard(pal)
+                    val dlRow = LinearLayout(activity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(dp(16), dp(12), dp(16), dp(12))
+                    }
+                    dlRow.addView(TextView(activity).apply {
+                        text = "Downloading model"
+                        dpText(14f)
+                        setTextColor(pal.textPrimary)
+                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                    })
+                    val valueView = TextView(activity).apply {
+                        text = downloadState.displayText()
+                        dpText(14f)
+                        typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                        setTextColor(pal.textSecondary)
+                    }
+                    dlRow.addView(valueView)
+                    downloadValueView = valueView
+                    dlCard.addView(dlRow)
+                    body.addView(dlCard)
+                }
 
                 val card = createGroupCard(pal)
                 if (displayModels.isEmpty()) {
@@ -5063,9 +5096,13 @@ class SettingsDialogs(private val activity: Activity) {
                         if (m.released.isNotEmpty()) subtitleParts.add("Released ${m.released}")
                         if (sizeMb > 0) subtitleParts.add("$sizeMb MB")
                         subtitleParts.add(ActiveModel.sizeClass(m.small))
+                        val dlThis = if (downloadState != null && downloadState.model == m.value) downloadState else null
+                        val isDownloadingThis = dlThis != null
+                        if (dlThis != null) subtitleParts.add(dlThis.displayText())
                         val latestSubtitle = subtitleParts.joinToString(" · ")
                         val activeBadge = ActiveModel.badgeFor(m.value, actives)
                         val latestBadge = activeBadge ?: when {
+                            isDownloadingThis -> "Downloading"
                             m.installed -> "Downloaded"
                             m.downloadAvailable -> "Download"
                             else -> m.unavailableReason
@@ -5080,6 +5117,9 @@ class SettingsDialogs(private val activity: Activity) {
                                 pal = pal
                             ) {
                                 when {
+                                    isDownloadingThis -> {
+                                        Toast.makeText(activity, "Already downloading — ${dlThis?.displayText() ?: "Downloading…"}", Toast.LENGTH_SHORT).show()
+                                    }
                                     !m.installed && m.downloadAvailable -> {
                                         if (!isParked) {
                                             Toast.makeText(activity, "Shift into Park to download models", Toast.LENGTH_SHORT).show()
@@ -5163,6 +5203,33 @@ class SettingsDialogs(private val activity: Activity) {
                     body.addView(soundBtn)
                 }
                 dialog.show()
+                if (downloadState != null) {
+                    // Addendum 135: keep the banner current while the
+                    // sheet stays open. When the download ends, reopen
+                    // once so the model lands in its installed state.
+                    // The loop dies with the sheet (isShowing checks).
+                    val handler = android.os.Handler(android.os.Looper.getMainLooper())
+                    val refresh = object : Runnable {
+                        override fun run() {
+                            if (!dialog.isShowing) return
+                            Thread {
+                                repo.getAllModels()
+                                val fresh = repo.getDownloadState()
+                                activity.runOnUiThread {
+                                    if (!dialog.isShowing) return@runOnUiThread
+                                    if (fresh == null) {
+                                        dialog.dismiss()
+                                        showModelLaboratoryDialog(client)
+                                    } else {
+                                        downloadValueView?.text = fresh.displayText()
+                                        handler.postDelayed(this, 3000L)
+                                    }
+                                }
+                            }.start()
+                        }
+                    }
+                    handler.postDelayed(refresh, 3000L)
+                }
             }
         }.start()
     }
@@ -5491,6 +5558,17 @@ class SettingsDialogs(private val activity: Activity) {
                                     } else {
                                         val (code, resp) = updater.postAction("install", actionBranch.ifEmpty { null })
                                         val attemptAt = System.currentTimeMillis()
+                                        // Addendum 134: no answer back
+                                        // (transport failure / ambiguous)
+                                        // means the install may already
+                                        // be running — the comma reboots
+                                        // before the response survives.
+                                        // Record the attempt unconfirmed
+                                        // so the engine completes it from
+                                        // the reboot cycle instead of
+                                        // re-installing forever.
+                                        val unconfirmed =
+                                            code == -1 || code == SgGalaxyClient.CODE_AMBIGUOUS
                                         SoftwareUpdateIntentStore.save(
                                             activity,
                                             if (code in 200..299) {
@@ -5499,12 +5577,17 @@ class SettingsDialogs(private val activity: Activity) {
                                                     acceptedAtMs = attemptAt
                                                 )
                                             } else {
-                                                newPending.copy(lastAttemptMs = attemptAt)
+                                                newPending.copy(
+                                                    lastAttemptMs = attemptAt,
+                                                    attemptUnconfirmed = unconfirmed
+                                                )
                                             }
                                         )
                                         activity.runOnUiThread {
                                             if (code in 200..299) {
                                                 Toast.makeText(activity, "Install started — the comma will reboot", Toast.LENGTH_LONG).show()
+                                            } else if (unconfirmed) {
+                                                Toast.makeText(activity, "Install sent — no answer back (the comma may already be rebooting). Updating continues automatically.", Toast.LENGTH_LONG).show()
                                             } else {
                                                 Toast.makeText(activity, CommaSoftwareUpdate.errorText(code, resp) + " — update saved, will keep trying", Toast.LENGTH_LONG).show()
                                             }
