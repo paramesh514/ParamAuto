@@ -352,6 +352,18 @@ object NavStateManager {
     @Volatile
     var softwareUpdateCompletionNote: String? = null
 
+    /**
+     * StarPilot channel of the connected comma (Addendum 128).
+     * UNKNOWN until a software status is read; capability checks
+     * resolve UNKNOWN to STABLE (see CommaBranch.kt).
+     */
+    @Volatile
+    var commaBranch: CommaBranch = CommaBranch.UNKNOWN
+
+    /** True only when the comma is positively on the testing channel. */
+    val testingFeaturesEnabled: Boolean
+        get() = testingApiEnabled(commaBranch)
+
     /** Active driving model display name (Feature 15); null while unknown. */
     @Volatile
     var activeModelName: String? = null

@@ -196,6 +196,10 @@ class MainActivity : Activity() {
         // Addendum 126: restore a pending comma software install so the
         // badge shows "Updating…" from the first frame after a restart.
         NavStateManager.softwareUpdatePending = SoftwareUpdateIntentStore.load(this) != null
+        // Addendum 128: restore the last known comma channel; a first
+        // install has none stored and resolves to stable until the
+        // first software status is read (CommaBranch.kt).
+        NavStateManager.commaBranch = CommaBranchStore.load(this)
         topBar = TopSearchBar(
             this,
             onSearchQuery = { searchDestinations(it) },

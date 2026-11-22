@@ -2206,6 +2206,15 @@ class CommaClient(private val context: Context) {
                 NavStateManager.softwareUpdateReady = st.updateReady
                 NavStateManager.softwareUpdateLabel =
                     st.targetBranch.ifEmpty { st.installedDisplayVersion }.ifEmpty { null }
+                // Addendum 128: record the comma's channel from the
+                // installed branch — testing-only functionality gates
+                // on it. An unreadable branch never downgrades a
+                // channel already known.
+                val branch = parseCommaBranch(st.branch)
+                if (branch != CommaBranch.UNKNOWN && branch != NavStateManager.commaBranch) {
+                    NavStateManager.commaBranch = branch
+                    CommaBranchStore.save(context, branch)
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Slow poll software status failed: ${e.message}")
