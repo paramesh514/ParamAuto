@@ -2885,7 +2885,7 @@ class MainActivity : Activity() {
             }
         }
         root.addView(bottomDock)
-        tripInfoBar.attachTo(bottomDock); arrivalCard.attachTo(bottomDock); driveSummaryCard.attachTo(bottomDock); lastDriveCard.attachTo(bottomDock)
+        tripInfoBar.attachTo(bottomDock); arrivalCard.attachTo(bottomDock); driveSummaryCard.attachTo(bottomDock); turnBanner.attachEndCardTo(bottomDock); lastDriveCard.attachTo(bottomDock)
         bottomDock.viewTreeObserver.addOnGlobalLayoutListener {
             val lp = bottomDock.layoutParams as? FrameLayout.LayoutParams
             val footprint = if (bottomDock.height > 0) bottomDock.height + (lp?.bottomMargin ?: 0) else 0

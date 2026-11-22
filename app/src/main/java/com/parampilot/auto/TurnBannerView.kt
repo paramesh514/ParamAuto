@@ -43,8 +43,10 @@ class TurnBannerView(
     private var queuedShownFor: NavDestination? = null
     private var queuedShownSync: Boolean = false
     // Route-end state card (backlog #3, moved to the bottom in
-    // Addendum 122): a separate bottom-anchored card, so an ended
-    // route never covers the search bar at the top.
+    // Addendum 122; moved INTO MainActivity's bottom dock in
+    // Addendum 138): a separate card, so an ended route never
+    // covers the search bar at the top. In the dock it stacks
+    // with the other bottom cards instead of overriding them.
     private lateinit var endCard: LinearLayout
     private lateinit var endIcon: ManeuverIconView
     private lateinit var endTitle: TextView
@@ -199,9 +201,8 @@ class TurnBannerView(
             background = HudOverlay.makeCardBg(ctx, COLOR_GMAPS_NAV_DARK, 20)
             elevation = 10f * den
             setPadding(dp(16), dp(14), dp(18), dp(14))
-            layoutParams = FrameLayout.LayoutParams(-1, -2).apply {
-                gravity = Gravity.BOTTOM
-                setMargins(dp(12), 0, dp(12), dp(16))
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply {
+                topMargin = dp(8)
             }
             visibility = View.GONE
             setOnClickListener {
@@ -237,7 +238,24 @@ class TurnBannerView(
         }
         endCol.addView(endSub)
         endCard.addView(endCol)
-        parent.addView(endCard)
+        // Addendum 138: the end card is deliberately NOT added to
+        // the banner's parent. As a free bottom-anchored card it
+        // overrode the dock's cards and slid under the navigation
+        // bar (Param, 2026-11-22, on vc46). MainActivity docks it
+        // via attachEndCardTo instead.
+    }
+
+    /**
+     * Addendum 138: parent the route-end card into MainActivity's
+     * bottom dock (below the drive summary, above Last Drive). In
+     * the dock it stacks vertically with the other notification
+     * cards, and the dock's own bottom margin keeps the whole
+     * stack clear of the navigation bar (Addendum 129).
+     */
+    fun attachEndCardTo(dock: LinearLayout) {
+        if (!::endCard.isInitialized) return
+        (endCard.parent as? android.view.ViewGroup)?.removeView(endCard)
+        dock.addView(endCard)
     }
 
     /** Background color for the route-end card given its state. */
