@@ -159,7 +159,9 @@ object M3Sheet {
                 text = subtitle
                 dpText(13f)
                 setTextColor(pal.textSecondary)
-                setSingleLine(true)
+                // Addendum 133: wrap instead of cutting to one line.
+                setSingleLine(false)
+                maxLines = 3
                 ellipsize = TextUtils.TruncateAt.END
                 setPadding(0, dp(activity, 2), 0, 0)
             }

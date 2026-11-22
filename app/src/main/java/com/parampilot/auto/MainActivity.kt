@@ -86,6 +86,9 @@ class MainActivity : Activity() {
     // destination the save dialog will start from.
     private var droppedPinMarker: Marker? = null
     private var droppedPinCard: LinearLayout? = null
+    // Addendum 133: last reported bottom-dock footprint, so the
+    // dropped-pin card can ride above the dock stack.
+    private var bottomDockFootprintPx = 0
     private var droppedPinLabel: TextView? = null
     private var droppedPinDest: NavDestination? = null
     private val altRouteMarkers = mutableListOf<Marker>()
@@ -2261,7 +2264,12 @@ class MainActivity : Activity() {
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply {
                     gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                    setMargins(dp(16), 0, dp(16), dp(110))
+                    // Addendum 133: ride above the dock stack when
+                    // it is taller than the authored 110dp margin.
+                    setMargins(
+                        dp(16), 0, dp(16),
+                        maxOf(dp(110), bottomDockFootprintPx + dp(8))
+                    )
                 }
             }
             val label = TextView(this).apply {
@@ -2637,51 +2645,49 @@ class MainActivity : Activity() {
         val density = resources.displayMetrics.density
         fun dp(v: Int) = (v * density).roundToInt()
 
+        // Addendum 133: an M3 sheet (M3Sheet), like the Settings screens.
+        val (dialog, sheetBody, pal) = M3Sheet.create(
+            this,
+            if (isAlreadyStarred) "Edit saved place" else "Save place",
+            dest.placeName.ifEmpty {
+                "%.4f, %.4f".format(dest.latitude, dest.longitude)
+            }
+        )
         val input = android.widget.EditText(this).apply {
             setText(dest.name)
             selectAll()
-            setTextColor(Color.WHITE)
-            setHintTextColor(0xFF64748B.toInt())
+            setTextColor(pal.textPrimary)
+            setHintTextColor(pal.textSecondary)
             hint = "Enter name (e.g. Gym, Mom's House)"
             textSize = 14f
             setPadding(dp(14), dp(10), dp(14), dp(10))
-            background = HudOverlay.makeCardBg(this@MainActivity, HudOverlay.COLOR_SURFACE_LIGHT, 8, HudOverlay.COLOR_BORDER, 1)
+            background = HudOverlay.makeCardBg(
+                this@MainActivity, pal.inputBg, 8, pal.border, 1
+            )
         }
-
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(10), dp(20), dp(10))
-            val sub = TextView(this@MainActivity).apply {
-                text = dest.placeName.ifEmpty { "%.4f, %.4f".format(dest.latitude, dest.longitude) }
-                textSize = 12f
-                setTextColor(HudOverlay.COLOR_TEXT_MUTED)
-                setPadding(0, 0, 0, dp(10))
-            }
-            addView(sub)
-            addView(input)
-        }
-
-        val builder = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle(if (isAlreadyStarred) "Edit saved place" else "Save place")
-            .setView(container as View)
-            .setPositiveButton("Save") { _: DialogInterface, _: Int ->
-                val name = input.text.toString().trim().ifEmpty { dest.name }
-                val savedDest = dest.copy(name = name)
-                Bookmarks.addStarred(this, savedDest)
-                Toast.makeText(this, "Saved \"$name\"", Toast.LENGTH_SHORT).show()
-                topBar.refreshSuggestions()
-            }
-            .setNegativeButton("Cancel", null)
-
+        sheetBody.addView(input)
+        val buttons = mutableListOf<TextView>()
         if (isAlreadyStarred) {
-            builder.setNeutralButton("Remove") { _: DialogInterface, _: Int ->
+            buttons += M3Sheet.dangerButton(this, pal, "Remove") {
                 Bookmarks.removeStarred(this, dest)
-                Toast.makeText(this, "Removed from saved places", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    this, "Removed from saved places", Toast.LENGTH_SHORT
+                ).show()
                 topBar.refreshSuggestions()
+                dialog.dismiss()
             }
         }
-
-        builder.show()
+        buttons += M3Sheet.tonalButton(this, pal, "Cancel") { dialog.dismiss() }
+        buttons += M3Sheet.primaryButton(this, pal, "Save") {
+            val name = input.text.toString().trim().ifEmpty { dest.name }
+            val savedDest = dest.copy(name = name)
+            Bookmarks.addStarred(this, savedDest)
+            Toast.makeText(this, "Saved \"$name\"", Toast.LENGTH_SHORT).show()
+            topBar.refreshSuggestions()
+            dialog.dismiss()
+        }
+        sheetBody.addView(M3Sheet.buttonRow(this, *buttons.toTypedArray()))
+        dialog.show()
     }
 
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
@@ -2883,7 +2889,21 @@ class MainActivity : Activity() {
         bottomDock.viewTreeObserver.addOnGlobalLayoutListener {
             val lp = bottomDock.layoutParams as? FrameLayout.LayoutParams
             val footprint = if (bottomDock.height > 0) bottomDock.height + (lp?.bottomMargin ?: 0) else 0
+            bottomDockFootprintPx = footprint
             hud.setBottomStackHeight(footprint)
+            // Addendum 133: keep the dropped-pin card above the dock
+            // stack — its authored 110dp margin slides under a
+            // two-card stack.
+            droppedPinCard?.let { card ->
+                val clp = card.layoutParams as? FrameLayout.LayoutParams
+                if (clp != null) {
+                    val target = maxOf(dockDp(110), footprint + dockDp(8))
+                    if (clp.bottomMargin != target) {
+                        clp.bottomMargin = target
+                        card.layoutParams = clp
+                    }
+                }
+            }
         }
         // Addendum 129: the dock itself must clear the system
         // navigation bar — at its authored 16dp margin the lowest
