@@ -334,6 +334,8 @@ class SettingsDialogs(private val activity: Activity) {
         badgeActive: Boolean = false,
         iconTint: Int? = null,
         iconTileBg: Int? = null,
+        trailingActionText: String? = null,
+        onTrailingAction: (() -> Unit)? = null,
         pal: M3Palette,
         onClick: () -> Unit
     ): LinearLayout {
@@ -398,13 +400,35 @@ class SettingsDialogs(private val activity: Activity) {
                 addView(badgeTv)
             }
 
-            val chevron = TextView(activity).apply {
-                text = "›"
-                dpText(19f)
-                setTextColor(pal.textSecondary)
-                setPadding(dp(4), 0, dp(2), 0)
+            // Addendum 137: an optional trailing action pill (e.g. a
+            // model's Delete button). It carries its own click
+            // listener, so tapping it never fires the row's action;
+            // when present it replaces the chevron.
+            if (!trailingActionText.isNullOrEmpty() && onTrailingAction != null) {
+                val actionTv = TextView(activity).apply {
+                    text = trailingActionText
+                    dpText(12f)
+                    typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                    setTextColor(if (pal.isNight) 0xFFF2B8B5.toInt() else 0xFFB3261E.toInt())
+                    background = HudOverlay.makeCardBg(activity, pal.inputBg, 11)
+                    setPadding(dp(10), dp(5), dp(10), dp(5))
+                    isClickable = true
+                    isFocusable = true
+                    setOnClickListener { onTrailingAction() }
+                    layoutParams = LinearLayout.LayoutParams(-2, -2).apply {
+                        setMargins(dp(6), 0, dp(2), 0)
+                    }
+                }
+                addView(actionTv)
+            } else {
+                val chevron = TextView(activity).apply {
+                    text = "›"
+                    dpText(19f)
+                    setTextColor(pal.textSecondary)
+                    setPadding(dp(4), 0, dp(2), 0)
+                }
+                addView(chevron)
             }
-            addView(chevron)
         }
     }
 
@@ -5036,6 +5060,36 @@ class SettingsDialogs(private val activity: Activity) {
                     body.addView(dlCard)
                 }
 
+                // Addendum 137: per-model Delete button (Param,
+                // 2026-11-22) — always behind a confirmation, same
+                // wording and flow as the delete-models list.
+                val confirmDeleteModel: (GalaxyModelItem) -> Unit = { m ->
+                    if (!isParked) {
+                        Toast.makeText(activity, "Shift into Park to delete models", Toast.LENGTH_SHORT).show()
+                    } else {
+                        showSheetConfirm(
+                            title = "Delete model",
+                            message = "Delete ${m.label} from the comma? You can download it again later.",
+                            positiveLabel = "Delete",
+                            danger = true,
+                            onPositive = {
+                                Thread {
+                                    val res = repo.deleteModel(m.value, "parked")
+                                    activity.runOnUiThread {
+                                        res.onSuccess {
+                                            Toast.makeText(activity, "Deleted: ${m.label}", Toast.LENGTH_SHORT).show()
+                                            dialog.dismiss()
+                                            showModelLaboratoryDialog(client)
+                                        }.onFailure { e ->
+                                            Toast.makeText(activity, "Failed: ${e.message}", Toast.LENGTH_LONG).show()
+                                        }
+                                    }
+                                }.start()
+                            }
+                        )
+                    }
+                }
+
                 val card = createGroupCard(pal)
                 if (displayModels.isEmpty()) {
                     card.addView(createKeyValueRow("Installed models", "None reported", pal))
@@ -5050,6 +5104,8 @@ class SettingsDialogs(private val activity: Activity) {
                                 subtitle = "${m.value} · ${ActiveModel.sizeClass(m.small)}",
                                 badgeText = badge,
                                 badgeActive = badge != null,
+                                trailingActionText = if (m.installed && !m.builtin) "Delete" else null,
+                                onTrailingAction = { confirmDeleteModel(m) },
                                 pal = pal
                             ) {
                                 if (!isParked) {
@@ -5114,6 +5170,8 @@ class SettingsDialogs(private val activity: Activity) {
                                 subtitle = latestSubtitle,
                                 badgeText = latestBadge,
                                 badgeActive = activeBadge != null || m.installed,
+                                trailingActionText = if (m.installed && !m.builtin) "Delete" else null,
+                                onTrailingAction = { confirmDeleteModel(m) },
                                 pal = pal
                             ) {
                                 when {
