@@ -2933,7 +2933,30 @@ class MainActivity : Activity() {
         root.addView(bottomDock)
         tripInfoBar.attachTo(bottomDock); arrivalCard.attachTo(bottomDock); driveSummaryCard.attachTo(bottomDock); lastDriveCard.attachTo(bottomDock)
         bottomDock.viewTreeObserver.addOnGlobalLayoutListener {
-            hud.setBottomStackHeight(bottomDock.height)
+            val lp = bottomDock.layoutParams as? FrameLayout.LayoutParams
+            val footprint = if (bottomDock.height > 0) bottomDock.height + (lp?.bottomMargin ?: 0) else 0
+            hud.setBottomStackHeight(footprint)
+        }
+        // Addendum 129: the dock itself must clear the system
+        // navigation bar — at its authored 16dp margin the lowest
+        // card's bottom strip slides behind the nav-bar scrim and
+        // renders dimmed (Param, 2026-11-21, on vc43). The dock's
+        // bottom margin follows the inset, same rule as the HUD
+        // clusters' lift; the layout listener above then reports the
+        // dock's true footprint to the HUD.
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(bottomDock) { v, insets ->
+            val navInset = insets.getInsets(
+                androidx.core.view.WindowInsetsCompat.Type.navigationBars()
+            ).bottom
+            val lp = v.layoutParams as? FrameLayout.LayoutParams
+            if (lp != null) {
+                val target = liftedBottomMargin(dockDp(16), navInset)
+                if (lp.bottomMargin != target) {
+                    lp.bottomMargin = target
+                    v.layoutParams = lp
+                }
+            }
+            insets
         }
         root.addView(createMapPickBanner())
         root.addView(aaScreenView, FrameLayout.LayoutParams(-1, -1))

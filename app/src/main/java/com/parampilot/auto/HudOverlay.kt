@@ -785,13 +785,14 @@ class HudOverlay(
 
     /**
      * Addendum 127: the bottom notification dock (MainActivity) reports
-     * its laid-out height after every layout pass; the bottom control
+     * its footprint after every layout pass; the bottom control
      * clusters lift above the whole stack. [contentHeightPx] is the
-     * dock's own height — its 16dp bottom margin and an 8dp visual gap
-     * are added here.
+     * dock's full footprint — its height plus its own bottom margin
+     * (which follows the navigation-bar inset, Addendum 129) — and
+     * only the 8dp visual gap is added here.
      */
     fun setBottomStackHeight(contentHeightPx: Int) {
-        val clearance = if (contentHeightPx <= 0) 0 else contentHeightPx + dp(24)
+        val clearance = if (contentHeightPx <= 0) 0 else contentHeightPx + dp(8)
         if (clearance == bottomStackClearancePx) return
         bottomStackClearancePx = clearance
         refreshBottomMargins()
