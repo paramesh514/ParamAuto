@@ -62,8 +62,6 @@ class HudOverlay(
 
     private val onSimClick: () -> Unit,
 
-    private val onAAScreenClick: () -> Unit,
-
     private val onAltRoutesClick: () -> Unit,
 
     private val onRecenterClick: () -> Unit,

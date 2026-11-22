@@ -125,7 +125,6 @@ class MainActivity : Activity() {
     private lateinit var driveSummaryCard: DriveSummaryView
     private lateinit var lastDriveCard: LastDriveCardView
     private var lastDriveCardShown: Boolean = false
-    private lateinit var aaScreenView: AndroidAutoScreenView
     private var latestPacket: TelemetryPacket? = null
     private var isRealMapStyleLoaded: Boolean = false
 
@@ -214,20 +213,6 @@ class MainActivity : Activity() {
         arrivalCard = ArrivalCardView(this, onDoneClick = { arrivalCard.hide() })
         driveSummaryCard = DriveSummaryView(this, onDoneClick = { driveSummaryCard.hide() })
         lastDriveCard = LastDriveCardView(this, onDismissClick = { lastDriveCard.hide() })
-        aaScreenView = AndroidAutoScreenView(
-            this,
-            onEndNavClick = {
-                endRouteByUser {
-                    aaScreenView.visibility = android.view.View.GONE
-                }
-            },
-            onCloseClick = {
-                aaScreenView.visibility = android.view.View.GONE
-            },
-            onToggleSimClick = {
-                toggleSimulation()
-            }
-        )
         hud = HudOverlay(this,
             onStatusClick = { dialogs.showConnectionModeDialog(client) { updateStatus() } },
             onSettingsClick = {
@@ -238,12 +223,10 @@ class MainActivity : Activity() {
                     { updateStatus() },
                     { hud.updateVoltage(it) },
                     { applyCurrentTheme() },
-                    { toggleSimulation() },
-                    { toggleAndroidAutoScreen() }
+                    { toggleSimulation() }
                 )
             },
             onSimClick = { toggleSimulation() },
-            onAAScreenClick = { toggleAndroidAutoScreen() },
             onAltRoutesClick = { toggleRoutesOverview() },
             onRecenterClick = { recenterToVehicle() },
             onSpeedCardClick = { recenterToVehicle() },
@@ -1086,7 +1069,6 @@ class MainActivity : Activity() {
         hud.updateGpu(GpuStatus.parse(NavStateManager.lastSystemMonitor))
         turnBanner.update(pkt.nav, activeDestination)
         updateTripInfo(activeDestination, pkt)
-        aaScreenView.update(pkt)
         if (!pkt.mapboxToken.isNullOrBlank()) {
             try {
                 if (MapLibre.getApiKey() != pkt.mapboxToken) {
@@ -1201,16 +1183,6 @@ class MainActivity : Activity() {
             Toast.makeText(this, "Simulation stopped", Toast.LENGTH_SHORT).show()
         }
         updateStatus()
-    }
-
-    private fun toggleAndroidAutoScreen() {
-        if (aaScreenView.visibility == android.view.View.VISIBLE) {
-            aaScreenView.visibility = android.view.View.GONE
-        } else {
-            aaScreenView.bringToFront()
-            aaScreenView.visibility = android.view.View.VISIBLE
-            latestPacket?.let { aaScreenView.update(it) }
-        }
     }
 
     private fun toggleNorthUp() {
@@ -2959,7 +2931,6 @@ class MainActivity : Activity() {
             insets
         }
         root.addView(createMapPickBanner())
-        root.addView(aaScreenView, FrameLayout.LayoutParams(-1, -1))
 
         val isNight = ThemeManager.isNightMode(this)
         hud.applyTheme(isNight); topBar.applyTheme(isNight); turnBanner.applyTheme(isNight); tripInfoBar.applyTheme(isNight); arrivalCard.applyTheme(isNight); driveSummaryCard.applyTheme(isNight); lastDriveCard.applyTheme(isNight)

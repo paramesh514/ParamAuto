@@ -625,8 +625,7 @@ class SettingsDialogs(private val activity: Activity) {
         onStatusRefresh: () -> Unit,
         onPowerRefresh: (PowerState?) -> Unit,
         onThemeChanged: () -> Unit,
-        onToggleSimulation: () -> Unit,
-        onShowAndroidAutoScreen: () -> Unit
+        onToggleSimulation: () -> Unit
     ) {
         val (dialog, body, pal) = createM3Dialog("Settings")
 
@@ -741,7 +740,7 @@ class SettingsDialogs(private val activity: Activity) {
                         dialog.dismiss()
                         showSettingsMenu(
                             client, onCenterVehicle, onOpenExternalMap, onStatusRefresh,
-                            onPowerRefresh, onThemeChanged, onToggleSimulation, onShowAndroidAutoScreen
+                            onPowerRefresh, onThemeChanged, onToggleSimulation
                         )
                     }
                 }
@@ -912,7 +911,7 @@ class SettingsDialogs(private val activity: Activity) {
                 pal = pal
             ) {
                 dialog.dismiss()
-                showPhoneDataDialog(client, onThemeChanged, onShowAndroidAutoScreen, onToggleSimulation)
+                showPhoneDataDialog(client, onThemeChanged, onToggleSimulation)
             }
         )
         navCard.addView(createDivider(pal))
@@ -960,21 +959,6 @@ class SettingsDialogs(private val activity: Activity) {
             ) {
                 dialog.dismiss()
                 showUsageCountersDialog()
-            }
-        )
-        navCard.addView(createDivider(pal))
-
-        navCard.addView(
-            createSettingsRow(
-                iconKind = SettingsIconView.Kind.CAR_DISPLAY,
-                title = "Android Auto preview",
-                subtitle = "Preview head unit navigation screen",
-                iconTint = pal.accentGreen,
-                iconTileBg = pal.accentGreenTonalBg,
-                pal = pal
-            ) {
-                dialog.dismiss()
-                onShowAndroidAutoScreen()
             }
         )
         navCard.addView(createDivider(pal))
@@ -4531,7 +4515,6 @@ class SettingsDialogs(private val activity: Activity) {
     fun showPhoneDataDialog(
         client: CommaClient?,
         onThemeChanged: () -> Unit,
-        onShowAndroidAutoScreen: () -> Unit,
         onToggleSimulation: () -> Unit
     ) {
         val (dialog, body, pal) = createM3Dialog(
@@ -5636,7 +5619,6 @@ class SettingsIconView(
         TUNE,
         SPARK,
         SPEED,
-        CAR_DISPLAY,
         NAVIGATION,
         MAP,
         STORAGE,
@@ -5728,11 +5710,6 @@ class SettingsIconView(
                 val arc = RectF(cx - s * 0.9f, cy - s * 0.75f, cx + s * 0.9f, cy + s * 1.05f)
                 canvas.drawArc(arc, 165f, 210f, false, strokePaint)
                 canvas.drawLine(cx, cy + s * 0.2f, cx + s * 0.48f, cy - s * 0.28f, strokePaint)
-            }
-            Kind.CAR_DISPLAY -> {
-                val screen = RectF(cx - s * 0.9f, cy - s * 0.65f, cx + s * 0.9f, cy + s * 0.55f)
-                canvas.drawRoundRect(screen, 3f * density, 3f * density, strokePaint)
-                canvas.drawLine(cx - s * 0.35f, cy + s * 0.85f, cx + s * 0.35f, cy + s * 0.85f, strokePaint)
             }
             Kind.NAVIGATION -> {
                 val path = Path().apply {
