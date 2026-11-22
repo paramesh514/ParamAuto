@@ -67,16 +67,16 @@ object SoftwareUpdatePlan {
         nowMs: Long
     ): Decision {
         if (pending == null) return Decision.IDLE
-        // Addendum 134: a successful install takes the comma down to
-        // reboot, which can eat the POST's own success response — so
-        // acceptance-by-response is unreliable for this action. An
-        // attempt the comma acted on (accepted 2xx, or unconfirmed
-        // because no answer came back) followed by the reboot cycle
-        // (heartbeat down, then back) IS the completion evidence. An
-        // attempt the comma answered with an error is a refusal: its
-        // later reboots prove nothing, so it never completes this way.
-        val actedOn = pending.acceptedAtMs > 0L || pending.attemptUnconfirmed
-        if (pending.commaWentDown && actedOn) {
+        // Param's rule (2026-11-22, Addendum 136): "Once comma goes
+        // into updating look for comma restart, once restart clear
+        // updating." The restart IS the completion signal — a
+        // successful install reboots the comma before the POST's
+        // response survives (Addendum 134), so completion never
+        // depends on the install response at all: any pending intent
+        // whose comma has been seen down completes when the heartbeat
+        // is back. The windows below remain only as backstops for a
+        // restart the app never observed (app closed throughout).
+        if (pending.commaWentDown) {
             return if (heartbeatUp) Decision.COMPLETED else Decision.WAITING
         }
         if (pending.acceptedAtMs > 0L) {

@@ -2257,13 +2257,12 @@ class CommaClient(private val context: Context) {
             }
             NavStateManager.softwareUpdatePending = true
             val heartbeatUp = deviceState != null
-            // Record the comma going down after an acted-on install
-            // attempt (accepted, or unconfirmed because the response
-            // was lost — Addendum 134): its return is the completion
-            // signal.
-            if (!heartbeatUp && !pending.commaWentDown &&
-                (pending.acceptedAtMs > 0L || pending.attemptUnconfirmed)
-            ) {
+            // Record the comma going down while an update is pending:
+            // per Param's rule (2026-11-22) the restart itself is the
+            // completion signal, so the latch is unconditional — it
+            // does not depend on the install POST's response, which a
+            // successful install usually destroys by rebooting.
+            if (!heartbeatUp && !pending.commaWentDown) {
                 pending = pending.copy(commaWentDown = true)
                 SoftwareUpdateIntentStore.save(context, pending)
             }
