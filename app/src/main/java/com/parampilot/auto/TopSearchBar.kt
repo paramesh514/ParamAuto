@@ -21,6 +21,7 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import kotlin.math.atan2
@@ -59,6 +60,12 @@ class TopSearchBar(
     private lateinit var quickChipsRow: LinearLayout
     private lateinit var resultsCard: ScrollView
     private lateinit var resultsList: LinearLayout
+    private lateinit var searchLoadingRow: LinearLayout
+
+    /** True while a network search is in flight: the spinner row sits
+     * above any interim (cached / starred) rows so they are not
+     * mistaken for the final results (Param, 2026-11-21). */
+    private var searchLoading: Boolean = false
     private lateinit var searchBarLayout: LinearLayout
 
     private var isUserTyping: Boolean = false
@@ -261,6 +268,36 @@ class TopSearchBar(
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(6), 0, dp(6))
         }
+        // Search-in-flight row (Param, 2026-11-21): a spinner +
+        // "Searching…" pinned above the result rows while the network
+        // search runs, so fast cached/starred rows are visibly interim.
+        // It lives OUTSIDE resultsList (which showResults clears) in a
+        // shared column inside the card.
+        searchLoadingRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+            setPadding(dp(16), dp(10), dp(16), dp(4))
+            addView(
+                ProgressBar(context, null, android.R.attr.progressBarStyleSmall).apply {
+                    layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply {
+                        setMargins(0, 0, dp(10), 0)
+                    }
+                }
+            )
+            addView(
+                TextView(context).apply {
+                    text = "Searching…"
+                    setTextColor(HudOverlay.COLOR_TEXT_MUTED)
+                    textSize = 13f
+                }
+            )
+        }
+        val resultsColumn = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(searchLoadingRow)
+            addView(resultsList)
+        }
         resultsCard = ScrollView(context).apply {
             background = HudOverlay.makeCardBg(context, HudOverlay.COLOR_SURFACE_DARK, 20, HudOverlay.COLOR_BORDER_DARK, 1)
             elevation = 10f * density
@@ -271,7 +308,7 @@ class TopSearchBar(
             ).apply {
                 setMargins(0, dp(8), 0, 0)
             }
-            addView(resultsList)
+            addView(resultsColumn)
         }
         rootContainer.addView(resultsCard)
 
@@ -348,6 +385,10 @@ class TopSearchBar(
     }
 
     fun showInitialSuggestions() {
+        // The suggestions home replaces any search state — a spinner
+        // left over from an abandoned query must not hang over it.
+        searchLoading = false
+        if (::searchLoadingRow.isInitialized) searchLoadingRow.visibility = View.GONE
         resultsList.removeAllViews()
         val isNight = ThemeManager.isNightMode(context)
         val textPrimary = if (isNight) 0xFFE3E3E3.toInt() else HudOverlay.COLOR_TEXT_PRIMARY_LIGHT
@@ -711,6 +752,21 @@ class TopSearchBar(
         onDestinationSelected(dest)
     }
 
+    /**
+     * Shows/hides the search-in-flight spinner (Param, 2026-11-21).
+     * While loading, the results card stays open even with no rows
+     * yet, so the user sees that fresh results are still coming.
+     */
+    fun setSearchLoading(loading: Boolean) {
+        searchLoading = loading
+        if (!::searchLoadingRow.isInitialized) return
+        searchLoadingRow.visibility = if (loading) View.VISIBLE else View.GONE
+        if (loading && isUserTyping) {
+            resultsCard.visibility = View.VISIBLE
+            quickChipsRow.visibility = View.GONE
+        }
+    }
+
     fun showResults(destinations: List<NavDestination>) {
         lastRenderedResults = destinations
         if (!isUserTyping) {
@@ -720,7 +776,15 @@ class TopSearchBar(
         }
         resultsList.removeAllViews()
         if (destinations.isEmpty()) {
-            hideResults()
+            // A search still in flight keeps the card open with just
+            // the spinner — an empty card here would read as "no
+            // results" while the real answer is still coming.
+            if (searchLoading) {
+                resultsCard.visibility = View.VISIBLE
+                quickChipsRow.visibility = View.GONE
+            } else {
+                hideResults()
+            }
             return
         }
 
@@ -820,6 +884,9 @@ class TopSearchBar(
     }
 
     fun hideResults() {
+        // Dismissing the results ends any search-in-flight display too.
+        searchLoading = false
+        if (::searchLoadingRow.isInitialized) searchLoadingRow.visibility = View.GONE
         resultsCard.visibility = View.GONE
         if (::quickChipsRow.isInitialized) {
             quickChipsRow.visibility = View.VISIBLE

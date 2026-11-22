@@ -1325,6 +1325,9 @@ class MainActivity : Activity() {
                 (results.isNotEmpty() && results.all { it.source == "comma" })
         }
         if (cached != null) {
+            // Cache hit is final for this query — no search follows,
+            // so no spinner.
+            topBar.setSearchLoading(false)
             topBar.showResults(ordered(starredMatches + cached))
             return
         }
@@ -1333,7 +1336,11 @@ class MainActivity : Activity() {
             topBar.showResults(starredMatches)
         }
 
-        // 2. Network only on explicit submission cache miss.
+        // 2. Network only on explicit submission cache miss. The
+        // spinner stays up until these fresh results land, so the
+        // interim rows above are not mistaken for the final answer
+        // (Param, 2026-11-21).
+        topBar.setSearchLoading(true)
         Thread {
             val token = client?.mapboxToken ?: NavStateManager.mapboxToken
             val start = currentGps ?: GpsPosition(33.4484, -112.0740)
@@ -1400,6 +1407,10 @@ class MainActivity : Activity() {
                             Toast.makeText(this@MainActivity, "Comma search: $err", Toast.LENGTH_LONG).show()
                         }
                     }
+                    // Fresh results are in — the spinner's job is done.
+                    // (A superseded query leaves the spinner to the
+                    // newer search that replaced it.)
+                    topBar.setSearchLoading(false)
                     topBar.showResults(ordered(starredMatches + places))
                 }
             }
