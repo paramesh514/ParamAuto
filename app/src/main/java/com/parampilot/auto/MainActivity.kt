@@ -2911,7 +2911,30 @@ class MainActivity : Activity() {
         }
 
         hud.attachTo(root); topBar.attachTo(root)
-        turnBanner.attachTo(root); tripInfoBar.attachTo(root); arrivalCard.attachTo(root); driveSummaryCard.attachTo(root); lastDriveCard.attachTo(root)
+        turnBanner.attachTo(root)
+        // Addendum 127: the four bottom notification cards live in one
+        // vertical dock anchored at the bottom of the screen, so cards
+        // visible at the same time stack instead of overriding each
+        // other. Last Drive sits lowest, directly under the bottom
+        // control strip. The dock reports its laid-out height to the
+        // HUD after every layout pass, and the HUD lifts the bottom
+        // control clusters above the whole stack.
+        val dockDensity = resources.displayMetrics.density
+        fun dockDp(v: Int) = (v * dockDensity).roundToInt()
+        val bottomDock = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.BOTTOM
+                setMargins(dockDp(12), 0, dockDp(12), dockDp(16))
+            }
+        }
+        root.addView(bottomDock)
+        tripInfoBar.attachTo(bottomDock); arrivalCard.attachTo(bottomDock); driveSummaryCard.attachTo(bottomDock); lastDriveCard.attachTo(bottomDock)
+        bottomDock.viewTreeObserver.addOnGlobalLayoutListener {
+            hud.setBottomStackHeight(bottomDock.height)
+        }
         root.addView(createMapPickBanner())
         root.addView(aaScreenView, FrameLayout.LayoutParams(-1, -1))
 

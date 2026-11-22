@@ -32,7 +32,7 @@ class ArrivalCardView(
     private lateinit var driveText: TextView
     private var isNight: Boolean = true
 
-    fun attachTo(root: FrameLayout) {
+    fun attachTo(dock: LinearLayout) {
         container = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -40,12 +40,11 @@ class ArrivalCardView(
             background = HudOverlay.makeCardBg(ctx, HudOverlay.COLOR_SURFACE_DARK, 28, HudOverlay.COLOR_BORDER_DARK, 1)
             elevation = 12f * den
             setPadding(dp(20), dp(14), dp(14), dp(14))
-            layoutParams = FrameLayout.LayoutParams(
+            layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
-                gravity = Gravity.BOTTOM
-                setMargins(dp(12), 0, dp(12), dp(16))
+                topMargin = dp(8)
             }
         }
 
@@ -117,7 +116,7 @@ class ArrivalCardView(
         }
         container.addView(doneBtn)
 
-        root.addView(container)
+        dock.addView(container)
     }
 
     fun applyTheme(night: Boolean) {
