@@ -21,23 +21,21 @@ import org.json.JSONObject
  *   live tap uses. Records written before kinds existed carry no
  *   "kind" field and are read as COORDS.
  *
- * Flushes are capped at [MAX_FLUSH_ATTEMPTS] failures per queued entry —
- * a destination the comma keeps rejecting is left queued (visible, and
- * cancellable) instead of being retried forever. The budget RE-ARMS
- * [FLUSH_REARM_MS] after the last failure (bug fix, 2026-11-08): the
- * counter is process-memory only, so without a re-arm three transient
- * failures during a flaky reconnect wedged the entry for the whole
- * process lifetime while the diagnostic promised a retry.
+ * While the comma is connected, a queued entry that the comma has
+ * not accepted is retried every [FLUSH_RETRY_INTERVAL_MS] (Param,
+ * 2026-11-21) until it is accepted or the user cancels it. While a
+ * queue entry exists, no NEW destination is accepted anywhere in the
+ * app — the queued one must be sent or cancelled first (Param,
+ * 2026-11-21).
  */
 object DestinationQueue {
 
     private const val PREFS_NAME = "comma_client"
     private const val KEY_QUEUED_DESTINATION = "queued_destination_json"
 
-    const val MAX_FLUSH_ATTEMPTS = 3
-
-    /** After this long since the last failed flush, the attempt budget re-arms. */
-    const val FLUSH_REARM_MS = 5 * 60 * 1000L
+    /** A not-accepted queued destination is retried on this interval
+     * while the comma is connected (Param, 2026-11-21). */
+    const val FLUSH_RETRY_INTERVAL_MS = 15_000L
 
     enum class Kind { COORDS, COMMA_PLACE }
 
@@ -69,12 +67,8 @@ object DestinationQueue {
             if (kind == Kind.COORDS) displayDestination() else null
     }
 
-    /** Failed flush attempts against the current entry; reset on save/clear/success. */
-    @Volatile
-    var flushAttempts: Int = 0
-        private set
-
-    /** When the most recent flush failed (epoch ms); drives the [FLUSH_REARM_MS] re-arm. */
+    /** When the most recent flush failed (epoch ms); drives the
+     * [FLUSH_RETRY_INTERVAL_MS] retry cadence. Reset on save/clear/success. */
     @Volatile
     var lastFlushFailureAtMs: Long = 0L
         private set
@@ -164,19 +158,28 @@ object DestinationQueue {
     fun queuedAtMs(json: JSONObject?): Long = json?.optLong("queuedAtMs", 0L) ?: 0L
 
     /**
-     * Flush only when the comma is reachable, an entry exists, and
-     * the attempt budget allows it — either attempts remain, or the
-     * last failure is at least [FLUSH_REARM_MS] old (re-armed).
+     * Flush only when the comma is connected and an entry exists. The
+     * first attempt is immediate; after a failure the next attempt
+     * waits [FLUSH_RETRY_INTERVAL_MS] (Param, 2026-11-21: "Once it is
+     * not accepted try every 15 seconds").
      */
     fun shouldFlush(
         commaFound: Boolean,
         hasQueued: Boolean,
-        attempts: Int,
         lastFailureAtMs: Long = 0L,
         nowMs: Long = System.currentTimeMillis()
     ): Boolean =
         commaFound && hasQueued &&
-            (attempts < MAX_FLUSH_ATTEMPTS || nowMs - lastFailureAtMs >= FLUSH_REARM_MS)
+            (lastFailureAtMs == 0L || nowMs - lastFailureAtMs >= FLUSH_RETRY_INTERVAL_MS)
+
+    /**
+     * True when [dest] is a NEW destination while [queued] is still
+     * waiting: new destinations are not accepted until the queue is
+     * cleared (Param, 2026-11-21). Re-selecting the queued
+     * destination itself is not blocked.
+     */
+    fun blocksNewDestination(queued: NavDestination?, dest: NavDestination): Boolean =
+        queued != null && !queued.isSameAs(dest)
 
     /**
      * Finds a COMMA_PLACE entry's place among fresh comma search
@@ -192,6 +195,33 @@ object DestinationQueue {
         if (wanted.isEmpty()) return null
         return results.firstOrNull { normalizePlaceName(it.name) == wanted }
     }
+
+    /**
+     * The ONE queued-indicator text (Addendum 122), shared by the top
+     * bar chip and the nav banner row so both surfaces say the same
+     * thing: queued-offline vs out-of-sync (comma reached but the
+     * destination not accepted — connect the comma to the Internet
+     * so it gets navigation details).
+     */
+    fun label(
+        dest: NavDestination,
+        outOfSync: Boolean,
+        networks: GalaxyNetworks? = null
+    ): String =
+        if (outOfSync) {
+            val wifiDetail = when {
+                networks?.connectedWifiName() != null ->
+                    "comma is on Wi-Fi '${networks.connectedWifiName()}' — "
+                networks?.link == "none" ->
+                    "comma has no Wi-Fi connection — "
+                networks?.link == "cellular" ->
+                    "comma is on cellular, not Wi-Fi — "
+                else -> ""
+            }
+            "Out of sync: ${dest.name} not accepted — ${wifiDetail}connect the comma to the Internet"
+        } else {
+            "Queued: ${dest.name} — will send when the comma connects"
+        }
 
     /** Lowercase, punctuation-collapsed form for name matching. */
     fun normalizePlaceName(raw: String): String =
@@ -210,7 +240,7 @@ object DestinationQueue {
     private fun saveEntry(context: Context, entry: Entry) {
         val record = toJson(entry.copy(queuedAtMs = System.currentTimeMillis()))
         prefs(context).edit().putString(KEY_QUEUED_DESTINATION, record.toString()).apply()
-        flushAttempts = 0
+        lastFlushFailureAtMs = 0L
     }
 
     fun save(context: Context, dest: NavDestination) {
@@ -258,17 +288,19 @@ object DestinationQueue {
 
     fun load(context: Context): NavDestination? = loadEntry(context)?.coordsDestination()
 
+    /** True while any entry is persisted in the queue. */
+    fun hasPending(context: Context): Boolean = loadEntry(context) != null
+
     fun clear(context: Context) {
         prefs(context).edit().remove(KEY_QUEUED_DESTINATION).apply()
-        flushAttempts = 0
+        lastFlushFailureAtMs = 0L
     }
 
     fun noteFlushFailure() {
-        flushAttempts++
         lastFlushFailureAtMs = System.currentTimeMillis()
     }
 
     fun noteFlushSuccess() {
-        flushAttempts = 0
+        lastFlushFailureAtMs = 0L
     }
 }

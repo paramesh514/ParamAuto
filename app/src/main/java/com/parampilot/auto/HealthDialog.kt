@@ -69,6 +69,10 @@ object HealthDialog {
         )
         addRow("Last status", client?.lastDiagnostic ?: "—")
 
+        // Addendum 128: the comma's StarPilot channel — functionality
+        // backed by testing-only APIs keys off this (CommaBranch.kt).
+        addRow("Comma channel", commaChannelLabel(NavStateManager.commaBranch))
+
         // Connection journal (2026-11-19): how much glitch evidence
         // is on file; "View log" below opens it.
         val journalStats = ConnectionJournal.stats()

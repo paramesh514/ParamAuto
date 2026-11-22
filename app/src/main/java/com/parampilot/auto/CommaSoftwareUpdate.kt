@@ -77,7 +77,7 @@ class CommaSoftwareUpdate(private val client: SgGalaxyClient) {
             val commitShort = installed?.optString("commit", "").orEmpty().take(8)
 
             val updater = json.optJSONObject("updater")
-            val updaterState = updater?.optString("state", "").orEmpty()
+            val updaterState = clean(updater?.optString("state", "").orEmpty())
             val targetBranch = updater?.optString("targetBranch", "").orEmpty()
             val updateAvailable = updater?.optBoolean("targetChangeFound", false) == true
             val updateReady = updater?.optBoolean("finalizedUpdateReady", false) == true
@@ -85,8 +85,8 @@ class CommaSoftwareUpdate(private val client: SgGalaxyClient) {
 
             val operations = json.optJSONObject("operations")
             val progress = operations?.optJSONObject("progress")
-            val stage = progress?.optString("stage", "").orEmpty()
-            val detail = progress?.optString("detail", "").orEmpty()
+            val stage = clean(progress?.optString("stage", "").orEmpty())
+            val detail = clean(progress?.optString("detail", "").orEmpty())
             val joined = listOf(stage, detail).filter { it.isNotBlank() }.joinToString(" — ")
             val progressText = joined.ifEmpty { updaterState }
 
@@ -121,6 +121,14 @@ class CommaSoftwareUpdate(private val client: SgGalaxyClient) {
                 autoDownloads = autoDownloads
             )
         }
+
+        /**
+         * org.json's optString returns the literal string "null" for a
+         * JSON null value (the comma reports a null updater state while
+         * idle — the dialog used to render Progress: null). Map it back
+         * to empty.
+         */
+        private fun clean(value: String): String = if (value == "null") "" else value
 
         /** Human-readable failure text: the device's own error wins. */
         fun errorText(code: Int, body: JSONObject?): String {

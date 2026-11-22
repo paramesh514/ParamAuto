@@ -1057,7 +1057,7 @@ class CommaClient(private val context: Context) {
             val lastScanned = getLastScannedIp()
             val fallbackIp = userProvided ?: lastScanned ?: "192.168.68.9"
 
-            val scannedIp = scanner.discover(userProvided ?: lastScanned)
+            val scannedIp = probeCloudReportedAddresses() ?: scanner.discover(userProvided ?: lastScanned)
             if (scannedIp != null) {
                 commaIp = scannedIp
                 isGalaxyCloud = false
@@ -1197,7 +1197,7 @@ class CommaClient(private val context: Context) {
         val foundLocal = if (quickOnly) {
             scanner.quickCheckLan()
         } else {
-            scanner.discover(savedIp)
+            probeCloudReportedAddresses() ?: scanner.discover(savedIp)
         } ?: return false
         notifyDiagnostic("Connected to local comma ($foundLocal:8082)")
         Thread {
@@ -1353,6 +1353,49 @@ class CommaClient(private val context: Context) {
         }, "comma-ble-failover").start()
     }
 
+    /**
+     * Addendum 123 (Param, 2026-11-21): before any subnet scan, ask
+     * the comma itself which addresses it is listening on — GET
+     * /api/local-access over the configured Galaxy Cloud session —
+     * and probe just those addresses. Returns the first candidate
+     * that verifies as the comma, or null when Cloud is not
+     * configured, no session token is stored, LAN probing is not
+     * allowed (Wi-Fi and hotspot both off), or no candidate answers;
+     * callers then fall back to their scan exactly as before. Never
+     * prompts: a missing or expired cloud session just skips the step.
+     */
+    private fun probeCloudReportedAddresses(): String? {
+        if (!isCloudConfigured()) return null
+        if (!scanner.lanScanAllowed()) return null
+        val token = GalaxyCloudSession.currentToken()?.takeIf { it.isNotEmpty() } ?: return null
+        val base = getGalaxyCloudBase().trimEnd('/')
+        val body = try {
+            val conn = (URL("$base/api/local-access").openConnection() as HttpURLConnection).apply {
+                connectTimeout = 4000
+                readTimeout = 4000
+                instanceFollowRedirects = false
+                setRequestProperty("Cookie", "${GalaxyCloudSession.COOKIE_NAME}=$token")
+                setRequestProperty("Accept", "application/json")
+            }
+            if (conn.responseCode != 200) {
+                Log.d(TAG, "local-access over Cloud returned HTTP ${conn.responseCode}")
+                return null
+            }
+            conn.inputStream.bufferedReader().use { it.readText() }
+        } catch (e: Exception) {
+            Log.d(TAG, "local-access over Cloud failed: ${e.message}")
+            return null
+        }
+        val ips = BleFailover.parseLocalAccessIps(JSONObject(body))
+        for (candidate in ips) {
+            if (scanner.isPortOpen(candidate) && scanner.verifyComma(candidate)) {
+                notifyDiagnostic("Comma address from Galaxy ($candidate) — no scan needed")
+                return candidate
+            }
+        }
+        return null
+    }
+
     private val localAccessLearnInFlight = AtomicBoolean(false)
 
     @Volatile
@@ -1439,18 +1482,19 @@ class CommaClient(private val context: Context) {
 
     /**
      * Offline destination queue flush (Feature 10): called from the poll
-     * loop whenever a telemetry fetch just succeeded. Runs at most one
+     * loop whenever a telemetry fetch just succeeded, so an attempt
+     * only ever runs while the comma is connected. Runs at most one
      * background flush at a time; the send itself is a normal
      * device-confirmed flow — the SG coordinate select for COORDS
      * entries, a re-search + selectPlace for COMMA_PLACE entries
-     * (Fix B). On confirmation the queue clears; on failure the attempt
-     * is counted and the entry stays queued until
-     * [DestinationQueue.MAX_FLUSH_ATTEMPTS] is reached.
+     * (Fix B). On confirmation the queue clears; on failure the entry
+     * stays queued and is retried every
+     * [DestinationQueue.FLUSH_RETRY_INTERVAL_MS] (Param, 2026-11-21).
      */
     private fun maybeFlushQueuedDestination() {
         if (!NavStateManager.isSgGalaxy) return
         val entry = DestinationQueue.loadEntry(context)
-        if (!DestinationQueue.shouldFlush(commaFound = true, hasQueued = entry != null, attempts = DestinationQueue.flushAttempts, lastFailureAtMs = DestinationQueue.lastFlushFailureAtMs)) return
+        if (!DestinationQueue.shouldFlush(commaFound = true, hasQueued = entry != null, lastFailureAtMs = DestinationQueue.lastFlushFailureAtMs)) return
         if (!queueFlushInFlight.compareAndSet(false, true)) return
         val queued = entry!!
         Thread({
@@ -1467,11 +1511,28 @@ class CommaClient(private val context: Context) {
                     DestinationQueue.clear(context)
                     DestinationQueue.noteFlushSuccess()
                     NavStateManager.queuedDestination = null
+                    NavStateManager.queuedOutOfSync = false
                     NavStateManager.notifyChanged()
                     notifyDiagnostic("Queued destination sent to comma: ${queued.name}")
                 } else {
                     DestinationQueue.noteFlushFailure()
-                    notifyDiagnostic("Queued destination send failed — will retry on the next connection")
+                    // The comma answered but still did not accept the
+                    // destination: phone and comma are out of sync
+                    // (Addendum 122) — the queued indicator switches to
+                    // the connect-the-comma-to-the-Internet message.
+                    // Refresh the comma's network snapshot so the
+                    // message can name the Wi-Fi it is on (Param,
+                    // 2026-11-21), then notify either way: the Wi-Fi
+                    // detail may have changed even when the sync flag
+                    // did not.
+                    NavStateManager.queuedOutOfSync = true
+                    try {
+                        NavigationManager().fetchNetworksSg(baseUrl)
+                    } catch (e: Exception) {
+                        Log.d(TAG, "Networks refresh for the sync message failed: ${e.message}")
+                    }
+                    NavStateManager.notifyChanged()
+                    notifyDiagnostic("Queued destination send failed — will retry in 15 seconds while the comma stays connected")
                 }
             } catch (e: Exception) {
                 DestinationQueue.noteFlushFailure()
@@ -2036,6 +2097,21 @@ class CommaClient(private val context: Context) {
                 lastSgDeviceState = state
             }
 
+            if (NavStateManager.softwareUpdatePending) {
+                // Addendum 126 quiet mode (Param, 2026-11-21: "When
+                // updating state active don't send any requests other
+                // then connectivity checks"): the heartbeat above is
+                // the only traffic while an install is pending. Keep
+                // the device state fresh from it, run the install
+                // engine off it, and skip everything else in this poll
+                // (monitor, offsets, slow poll, route, telemetry).
+                if (state != null) {
+                    NavStateManager.setDeviceState(state)
+                }
+                runPendingSoftwareInstall(client, deviceState)
+                return null
+            }
+
             // Extract battery voltage from /api/system/monitor (primary) and /api/device/state (fallback)
             val monitor = client.fetchSystemMonitor()
             // Keep the raw payload for the health screen (Feature 4): it
@@ -2130,6 +2206,15 @@ class CommaClient(private val context: Context) {
                 NavStateManager.softwareUpdateReady = st.updateReady
                 NavStateManager.softwareUpdateLabel =
                     st.targetBranch.ifEmpty { st.installedDisplayVersion }.ifEmpty { null }
+                // Addendum 128: record the comma's channel from the
+                // installed branch — testing-only functionality gates
+                // on it. An unreadable branch never downgrades a
+                // channel already known.
+                val branch = parseCommaBranch(st.branch)
+                if (branch != CommaBranch.UNKNOWN && branch != NavStateManager.commaBranch) {
+                    NavStateManager.commaBranch = branch
+                    CommaBranchStore.save(context, branch)
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Slow poll software status failed: ${e.message}")
@@ -2150,6 +2235,57 @@ class CommaClient(private val context: Context) {
             }
         } catch (e: Exception) {
             Log.w(TAG, "Slow poll active model failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Addendum 126: the pending-install engine, run once per heartbeat
+     * from fetchSgTelemetry's quiet branch. Quiet mode allows no
+     * requests beyond the connectivity check, so everything here is
+     * driven by the heartbeat result alone: retry the install POST
+     * while the comma answers and the car is parked; read completion
+     * from the reboot cycle (accepted → heartbeat lost → heartbeat
+     * back). The intent is persisted (SoftwareUpdateIntentStore), so
+     * it survives app restarts; decisions are SoftwareUpdatePlan's.
+     */
+    private fun runPendingSoftwareInstall(client: SgGalaxyClient, deviceState: JSONObject?) {
+        try {
+            var pending = SoftwareUpdateIntentStore.load(context)
+            if (pending == null) {
+                NavStateManager.softwareUpdatePending = false
+                return
+            }
+            NavStateManager.softwareUpdatePending = true
+            val heartbeatUp = deviceState != null
+            // Record the comma going down after an accepted install:
+            // its return is the completion signal.
+            if (!heartbeatUp && pending.acceptedAtMs > 0L && !pending.commaWentDown) {
+                pending = pending.copy(commaWentDown = true)
+                SoftwareUpdateIntentStore.save(context, pending)
+            }
+            val parked = deviceState?.optString("state", "")?.trim()
+                ?.equals("parked", ignoreCase = true) == true
+            val now = System.currentTimeMillis()
+            when (SoftwareUpdatePlan.evaluate(pending, heartbeatUp, parked, now)) {
+                SoftwareUpdatePlan.Decision.ATTEMPT -> {
+                    val (code, _) = CommaSoftwareUpdate(client).postAction(
+                        "install", pending.branch.ifEmpty { null }
+                    )
+                    val attempted = pending.copy(lastAttemptMs = now)
+                    SoftwareUpdateIntentStore.save(
+                        context,
+                        if (code in 200..299) attempted.copy(acceptedAtMs = now) else attempted
+                    )
+                }
+                SoftwareUpdatePlan.Decision.COMPLETED -> {
+                    SoftwareUpdateIntentStore.clear(context)
+                    NavStateManager.softwareUpdatePending = false
+                    NavStateManager.softwareUpdateCompletionNote = "Comma software updated"
+                }
+                else -> Unit
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Pending software install failed: ${e.message}")
         }
     }
 

@@ -11,6 +11,16 @@ fun liftedBottomMargin(baseMarginPx: Int, navBarInsetPx: Int): Int =
     maxOf(baseMarginPx, navBarInsetPx)
 
 /**
+ * Bottom margin when a notification stack occupies the bottom of the
+ * screen (Addendum 127): the control must clear whichever is tallest —
+ * its authored margin, the navigation-bar inset, or the stack's
+ * clearance (the stack's height plus its own bottom margin and a
+ * visual gap, computed by HudOverlay.setBottomStackHeight).
+ */
+fun stackedBottomMargin(baseMarginPx: Int, navBarInsetPx: Int, stackClearancePx: Int): Int =
+    maxOf(liftedBottomMargin(baseMarginPx, navBarInsetPx), stackClearancePx)
+
+/**
  * Height cap for a settings sheet's ScrollView: the sheet's own ratio cap,
  * but never more than the height the parent actually offered (the space
  * left after the drag handle, header and paddings). Ignoring a tighter

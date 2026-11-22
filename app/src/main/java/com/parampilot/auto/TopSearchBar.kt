@@ -21,6 +21,7 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import kotlin.math.atan2
@@ -51,14 +52,20 @@ class TopSearchBar(
     private lateinit var searchInput: EditText
     private lateinit var clearBtn: TextView
     private lateinit var micBtn: PlaceVectorIconView
-    private lateinit var budgetLabel: TextView
     private lateinit var queuedRow: LinearLayout
     private lateinit var queuedLabel: TextView
     private var queuedDestShown: NavDestination? = null
+    private var queuedShownSync: Boolean = false
     private var onQueuedCancel: (() -> Unit)? = null
     private lateinit var quickChipsRow: LinearLayout
     private lateinit var resultsCard: ScrollView
     private lateinit var resultsList: LinearLayout
+    private lateinit var searchLoadingRow: LinearLayout
+
+    /** True while a network search is in flight: the spinner row sits
+     * above any interim (cached / starred) rows so they are not
+     * mistaken for the final results (Param, 2026-11-21). */
+    private var searchLoading: Boolean = false
     private lateinit var searchBarLayout: LinearLayout
 
     private var isUserTyping: Boolean = false
@@ -207,17 +214,6 @@ class TopSearchBar(
         searchBar.addView(micBtn)
         rootContainer.addView(searchBar)
 
-        // 1b. Comma search budget line (Feature 6): visible only while a
-        // budget is known; text comes from MapboxUsage.label().
-        budgetLabel = TextView(context).apply {
-            textSize = 12.5f
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setTextColor(HudOverlay.COLOR_TEXT_MUTED)
-            setPadding(dp(16), dp(6), dp(16), 0)
-            visibility = View.GONE
-        }
-        rootContainer.addView(budgetLabel)
-
         // 1c. Offline queue chip (Feature 10): the destination waiting to
         // be sent when the comma reconnects; tapping cancels the queue.
         queuedRow = LinearLayout(context).apply {
@@ -272,6 +268,36 @@ class TopSearchBar(
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(6), 0, dp(6))
         }
+        // Search-in-flight row (Param, 2026-11-21): a spinner +
+        // "Searching…" pinned above the result rows while the network
+        // search runs, so fast cached/starred rows are visibly interim.
+        // It lives OUTSIDE resultsList (which showResults clears) in a
+        // shared column inside the card.
+        searchLoadingRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+            setPadding(dp(16), dp(10), dp(16), dp(4))
+            addView(
+                ProgressBar(context, null, android.R.attr.progressBarStyleSmall).apply {
+                    layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply {
+                        setMargins(0, 0, dp(10), 0)
+                    }
+                }
+            )
+            addView(
+                TextView(context).apply {
+                    text = "Searching…"
+                    setTextColor(HudOverlay.COLOR_TEXT_MUTED)
+                    textSize = 13f
+                }
+            )
+        }
+        val resultsColumn = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(searchLoadingRow)
+            addView(resultsList)
+        }
         resultsCard = ScrollView(context).apply {
             background = HudOverlay.makeCardBg(context, HudOverlay.COLOR_SURFACE_DARK, 20, HudOverlay.COLOR_BORDER_DARK, 1)
             elevation = 10f * density
@@ -282,7 +308,7 @@ class TopSearchBar(
             ).apply {
                 setMargins(0, dp(8), 0, 0)
             }
-            addView(resultsList)
+            addView(resultsColumn)
         }
         rootContainer.addView(resultsCard)
 
@@ -359,6 +385,10 @@ class TopSearchBar(
     }
 
     fun showInitialSuggestions() {
+        // The suggestions home replaces any search state — a spinner
+        // left over from an abandoned query must not hang over it.
+        searchLoading = false
+        if (::searchLoadingRow.isInitialized) searchLoadingRow.visibility = View.GONE
         resultsList.removeAllViews()
         val isNight = ThemeManager.isNightMode(context)
         val textPrimary = if (isNight) 0xFFE3E3E3.toInt() else HudOverlay.COLOR_TEXT_PRIMARY_LIGHT
@@ -722,6 +752,21 @@ class TopSearchBar(
         onDestinationSelected(dest)
     }
 
+    /**
+     * Shows/hides the search-in-flight spinner (Param, 2026-11-21).
+     * While loading, the results card stays open even with no rows
+     * yet, so the user sees that fresh results are still coming.
+     */
+    fun setSearchLoading(loading: Boolean) {
+        searchLoading = loading
+        if (!::searchLoadingRow.isInitialized) return
+        searchLoadingRow.visibility = if (loading) View.VISIBLE else View.GONE
+        if (loading && isUserTyping) {
+            resultsCard.visibility = View.VISIBLE
+            quickChipsRow.visibility = View.GONE
+        }
+    }
+
     fun showResults(destinations: List<NavDestination>) {
         lastRenderedResults = destinations
         if (!isUserTyping) {
@@ -731,7 +776,15 @@ class TopSearchBar(
         }
         resultsList.removeAllViews()
         if (destinations.isEmpty()) {
-            hideResults()
+            // A search still in flight keeps the card open with just
+            // the spinner — an empty card here would read as "no
+            // results" while the real answer is still coming.
+            if (searchLoading) {
+                resultsCard.visibility = View.VISIBLE
+                quickChipsRow.visibility = View.GONE
+            } else {
+                hideResults()
+            }
             return
         }
 
@@ -757,27 +810,8 @@ class TopSearchBar(
         quickChipsRow.visibility = View.GONE
     }
 
-    /** Feature 6: comma search budget line under the search bar; null hides it. */
-    fun setSearchBudget(text: String?, warning: Boolean) {
-        if (!::budgetLabel.isInitialized) return
-        if (text == null) {
-            budgetLabel.visibility = View.GONE
-            return
-        }
-        budgetLabel.text = text
-        val night = ThemeManager.isNightMode(context)
-        budgetLabel.setTextColor(
-            when {
-                warning -> HudOverlay.COLOR_ACCENT_AMBER
-                night -> HudOverlay.COLOR_TEXT_MUTED
-                else -> HudOverlay.COLOR_TEXT_MUTED_LIGHT
-            }
-        )
-        budgetLabel.visibility = View.VISIBLE
-    }
-
     /** Feature 10: the offline-queue chip; null hides it. Tapping it (or its ✕) cancels via [onCancel]. */
-    fun setQueuedDestination(dest: NavDestination?, onCancel: () -> Unit) {
+    fun setQueuedDestination(dest: NavDestination?, outOfSync: Boolean, onCancel: () -> Unit) {
         if (!::queuedRow.isInitialized) return
         onQueuedCancel = onCancel
         if (dest == null) {
@@ -785,9 +819,13 @@ class TopSearchBar(
             queuedRow.visibility = View.GONE
             return
         }
-        if (queuedDestShown?.isSameAs(dest) == true && queuedRow.visibility == View.VISIBLE) return
+        val label = DestinationQueue.label(dest, outOfSync, NavStateManager.commaNetworks)
+        if (queuedDestShown?.isSameAs(dest) == true && queuedShownSync == outOfSync &&
+            queuedLabel.text.toString() == label && queuedRow.visibility == View.VISIBLE
+        ) return
         queuedDestShown = dest
-        queuedLabel.text = "Queued: ${dest.name} — will send when the comma connects"
+        queuedShownSync = outOfSync
+        queuedLabel.text = label
         queuedRow.visibility = View.VISIBLE
     }
 
@@ -846,6 +884,9 @@ class TopSearchBar(
     }
 
     fun hideResults() {
+        // Dismissing the results ends any search-in-flight display too.
+        searchLoading = false
+        if (::searchLoadingRow.isInitialized) searchLoadingRow.visibility = View.GONE
         resultsCard.visibility = View.GONE
         if (::quickChipsRow.isInitialized) {
             quickChipsRow.visibility = View.VISIBLE

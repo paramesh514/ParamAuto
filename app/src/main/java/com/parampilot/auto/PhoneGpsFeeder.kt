@@ -266,6 +266,9 @@ object PhoneGpsFeeder {
     /** Builds the exact-contract body and POSTs one fix. Runs on [executor]. */
     private fun postFix(ep: String, loc: Location) {
         if (!isFeeding || endpoint != ep) return
+        // Addendum 126 quiet mode: no sends while a comma software
+        // install is pending (connectivity checks only).
+        if (NavStateManager.softwareUpdatePending) return
         // The transport can flip to Cloud mid-session: stop sending
         // the moment it does (the session itself ends through the
         // usual navigation-end / stop path).

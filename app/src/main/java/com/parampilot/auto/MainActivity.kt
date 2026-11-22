@@ -193,6 +193,13 @@ class MainActivity : Activity() {
 
         NavStateManager.appContext = applicationContext
         dialogs = SettingsDialogs(this)
+        // Addendum 126: restore a pending comma software install so the
+        // badge shows "Updating…" from the first frame after a restart.
+        NavStateManager.softwareUpdatePending = SoftwareUpdateIntentStore.load(this) != null
+        // Addendum 128: restore the last known comma channel; a first
+        // install has none stored and resolves to stable until the
+        // first software status is read (CommaBranch.kt).
+        NavStateManager.commaBranch = CommaBranchStore.load(this)
         topBar = TopSearchBar(
             this,
             onSearchQuery = { searchDestinations(it) },
@@ -540,15 +547,25 @@ class MainActivity : Activity() {
             // Home-screen widget (Feature 20): persist the last-known
             // comma state for the widget; change-gated inside the updater.
             CommaWidgetUpdater.refresh(this)
-            // Search budget (Feature 6) + offline queue chip (Feature 10):
-            // cheap setters, refreshed on every state change.
+            // Offline queue chip (Feature 10): cheap setter, refreshed on
+            // every state change.
             if (::topBar.isInitialized) {
-                topBar.setSearchBudget(
-                    MapboxUsage.labelFor(NavStateManager.mapboxUsage),
-                    NavStateManager.mapboxUsage?.isLow == true
-                )
-                topBar.setQueuedDestination(NavStateManager.queuedDestination) {
+                topBar.setQueuedDestination(
+                    NavStateManager.queuedDestination,
+                    NavStateManager.queuedOutOfSync
+                ) {
                     cancelQueuedDestination()
+                }
+                // Same queued state on the nav banner (Addendum 122):
+                // the top bar is hidden while navigating, so the banner
+                // row is the one queued popup on screen then.
+                if (::turnBanner.isInitialized) {
+                    turnBanner.setQueued(
+                        NavStateManager.queuedDestination,
+                        NavStateManager.queuedOutOfSync
+                    ) {
+                        cancelQueuedDestination()
+                    }
                 }
                 // Comma places (Feature 8): re-render open suggestions only
                 // when the comma's lists actually changed.
@@ -644,10 +661,11 @@ class MainActivity : Activity() {
                 tripInfoBar.hide()
             }
             // End Route confidence (backlog #3): while an end state is
-            // visible, the nav header shows it instead of the maneuver
-            // banner — "Ending route…" in flight, "Route ended ✓" once
-            // the comma confirms, "⚠ Comma still navigating" when the
-            // device kept the destination (tap the banner to retry). A
+            // visible, a bottom card shows it (moved off the top in
+            // Addendum 122 so it never covers the search bar) —
+            // "Ending route…" in flight, "Route ended ✓" once the
+            // comma confirms, "⚠ Comma still navigating" when the
+            // device kept the destination (tap the card to retry). A
             // live destination always wins over a stale end state.
             // Driven last so a clearNavigation inside this listener
             // cannot hide the banner after it is shown.
@@ -1044,6 +1062,11 @@ class MainActivity : Activity() {
         hud.updateVoltage(NavStateManager.latestPower)
         hud.updateGpu(GpuStatus.parse(NavStateManager.lastSystemMonitor))
         hud.setUpdateReady(NavStateManager.softwareUpdateReady)
+        hud.setUpdatePending(NavStateManager.softwareUpdatePending)
+        NavStateManager.softwareUpdateCompletionNote?.let { note ->
+            NavStateManager.softwareUpdateCompletionNote = null
+            Toast.makeText(this, note, Toast.LENGTH_LONG).show()
+        }
         maybeShowLastDriveCard()
         checkAndApplyMapStyle()
     }
@@ -1314,6 +1337,9 @@ class MainActivity : Activity() {
                 (results.isNotEmpty() && results.all { it.source == "comma" })
         }
         if (cached != null) {
+            // Cache hit is final for this query — no search follows,
+            // so no spinner.
+            topBar.setSearchLoading(false)
             topBar.showResults(ordered(starredMatches + cached))
             return
         }
@@ -1322,7 +1348,11 @@ class MainActivity : Activity() {
             topBar.showResults(starredMatches)
         }
 
-        // 2. Network only on explicit submission cache miss.
+        // 2. Network only on explicit submission cache miss. The
+        // spinner stays up until these fresh results land, so the
+        // interim rows above are not mistaken for the final answer
+        // (Param, 2026-11-21).
+        topBar.setSearchLoading(true)
         Thread {
             val token = client?.mapboxToken ?: NavStateManager.mapboxToken
             val start = currentGps ?: GpsPosition(33.4484, -112.0740)
@@ -1389,6 +1419,10 @@ class MainActivity : Activity() {
                             Toast.makeText(this@MainActivity, "Comma search: $err", Toast.LENGTH_LONG).show()
                         }
                     }
+                    // Fresh results are in — the spinner's job is done.
+                    // (A superseded query leaves the spinner to the
+                    // newer search that replaced it.)
+                    topBar.setSearchLoading(false)
                     topBar.showResults(ordered(starredMatches + places))
                 }
             }
@@ -1396,6 +1430,22 @@ class MainActivity : Activity() {
     }
 
     private fun handleDestinationSelected(dest: NavDestination) {
+        // Queue lock (Param, 2026-11-21): while a destination is
+        // queued, no NEW destination is accepted — the queued one
+        // must be sent or cancelled first. The name check here stops
+        // the tap early (before any resolve work); the resolved
+        // destination is checked again in applyDestination /
+        // applyDestinationViaCommaPlace.
+        val queuedNow = NavStateManager.queuedDestination
+            ?: DestinationQueue.loadEntry(this)?.displayDestination()
+        if (queuedNow != null && !queuedNow.name.equals(dest.name, ignoreCase = true)) {
+            Toast.makeText(
+                this,
+                "A destination is already queued — it must be sent or cancelled before choosing another",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
         val resolved = SearchCache.applyResolved(dest)
         if (resolved.hasCoordinates) {
             applyDestination(resolved)
@@ -1480,6 +1530,7 @@ class MainActivity : Activity() {
      * or trip-compute from until the comma confirms.
      */
     private fun applyDestinationViaCommaPlace(dest: NavDestination) {
+        if (queuedDestinationBlocks(dest)) return
         isNavClearedByUser = false
         NavStateManager.setNavClearedByUser(false)  // re-enable dest syncing from Comma telemetry
         DestinationHistory.record(this, dest)
@@ -1502,20 +1553,21 @@ class MainActivity : Activity() {
             // navigation ends (Param, 2026-11-03); on failure it stops.
             if (ok) PhoneGpsFeeder.startNavigationSession(target) else PhoneGpsFeeder.stop()
             runOnUiThread {
+                if (ok) clearQueueIfMatches(dest)
                 if (!ok) {
-                    rollbackUnconfirmedDestination(dest)
-                    if (queueDestinationIfOffline(dest) || queueCommaPlaceIfOffline(dest)) {
-                        Toast.makeText(
-                            this@MainActivity,
-                            "Comma offline — destination queued, will send when it connects",
-                            Toast.LENGTH_LONG
-                        ).show()
-                    } else {
+                    // Addendum 122: queued = keep the local navigation
+                    // (map-app mode), no rollback, no toast — the queued
+                    // chip / banner row is the only popup.
+                    val queued = queueDestinationOnFailure(dest) || queueCommaPlaceOnFailure(dest)
+                    if (!queued) {
+                        rollbackUnconfirmedDestination(dest)
                         Toast.makeText(
                             this@MainActivity,
                             "Destination NOT accepted by the comma — ${NavigationManager.lastSendError ?: "no confirmation from the device"}",
                             Toast.LENGTH_LONG
                         ).show()
+                    } else {
+                        updateTripInfo(dest, latestPacket)
                     }
                 } else {
                     updateTripInfo(dest, latestPacket)
@@ -1534,19 +1586,76 @@ class MainActivity : Activity() {
      * Offline queue (Feature 10): when a USER destination send fails
      * because the comma is offline, hold the destination in the queue
      * instead of dropping it — it flushes automatically when the comma
-     * reconnects. Returns true when queued (the caller then shows the
-     * queued toast instead of the NOT-accepted error). Coordinate-less
+     * reconnects. Returns true when queued (the caller then keeps the
+     * local navigation and shows no toast — Addendum 122). Coordinate-less
      * destinations are not queued here — comma suggestions go through
-     * [queueCommaPlaceIfOffline] instead; when the comma IS reachable,
-     * today's error behavior is kept.
+     * [queueCommaPlaceOnFailure] instead.
+     *
+     * Addendum 122: queueing now happens on ANY send failure, not only
+     * while the comma is unreachable — a comma that answers but does
+     * not accept the destination (typically no Internet on the comma)
+     * leaves phone and comma out of sync, and the entry still flushes
+     * automatically once the comma accepts it. [NavStateManager
+     * .queuedOutOfSync] records which case this was, from whether the
+     * comma was found at queue time.
      */
-    private fun queueDestinationIfOffline(dest: NavDestination): Boolean {
+    private fun queueDestinationOnFailure(dest: NavDestination): Boolean {
         if (!dest.hasCoordinates) return false
-        if (NavStateManager.commaFound) return false
         DestinationQueue.save(this, dest)
         NavStateManager.queuedDestination = dest
+        NavStateManager.queuedOutOfSync = NavStateManager.commaFound
         NavStateManager.notifyChanged()
+        if (NavStateManager.queuedOutOfSync) refreshQueuedSyncNetwork()
         return true
+    }
+
+    /**
+     * Queue lock (Param, 2026-11-21): true — with the reason already
+     * toasted — when [dest] is a NEW destination while another one is
+     * still queued. The queued destination must be sent (the flush
+     * retries every 15 s while the comma is connected) or cancelled
+     * before anything else is accepted.
+     */
+    private fun queuedDestinationBlocks(dest: NavDestination): Boolean {
+        val queued = NavStateManager.queuedDestination
+            ?: DestinationQueue.loadEntry(this)?.displayDestination()
+            ?: return false
+        if (!DestinationQueue.blocksNewDestination(queued, dest)) return false
+        Toast.makeText(
+            this,
+            "A destination is already queued — it must be sent or cancelled before choosing another",
+            Toast.LENGTH_LONG
+        ).show()
+        return true
+    }
+
+    /** Clears the queue when a live send of the queued destination
+     * itself succeeds — it is no longer waiting. */
+    private fun clearQueueIfMatches(dest: NavDestination) {
+        val queued = NavStateManager.queuedDestination ?: return
+        if (!queued.isSameAs(dest)) return
+        DestinationQueue.clear(this)
+        NavStateManager.queuedDestination = null
+        NavStateManager.queuedOutOfSync = false
+        NavStateManager.notifyChanged()
+    }
+
+    /**
+     * Fetches the comma's network snapshot in the background so the
+     * out-of-sync message can name the Wi-Fi the comma is on (Param,
+     * 2026-11-21). Best-effort: a failed fetch leaves the generic
+     * message, and the flush's failure path refreshes it again.
+     */
+    private fun refreshQueuedSyncNetwork() {
+        val target = client?.getEffectiveNavigationEndpoint() ?: return
+        Thread {
+            try {
+                navManager.fetchNetworksSg(SgGalaxyClient.baseUrlFor(target))
+                NavStateManager.notifyChanged()
+            } catch (e: Exception) {
+                Log.d("MainActivity", "Networks refresh for the sync message failed: ${e.message}")
+            }
+        }.start()
     }
 
     /**
@@ -1554,27 +1663,37 @@ class MainActivity : Activity() {
      * suggestion has no coordinates to flush with, so the queue stores
      * the producing search query plus the suggestion's stable place id;
      * on reconnect the flush re-runs that search and selects the place
-     * again through the normal selectPlace flow. Queued only while the
-     * comma is offline, and only when the place can be re-found (an id
-     * or a query must exist). When the comma IS reachable, the caller's
-     * NOT-accepted error behavior is kept.
+     * again through the normal selectPlace flow. Queued whenever the
+     * send failed and the place can be re-found (an id or a query must
+     * exist) — see [queueDestinationOnFailure] for the Addendum 122
+     * widening to connected-but-not-accepted failures.
      */
-    private fun queueCommaPlaceIfOffline(dest: NavDestination): Boolean {
-        if (NavStateManager.commaFound) return false
+    private fun queueCommaPlaceOnFailure(dest: NavDestination): Boolean {
         val id = dest.mapboxId?.takeIf { it.isNotBlank() }
         val query = latestSearchQuery.trim().ifEmpty { null }
         if (id == null && query == null) return false
         DestinationQueue.saveCommaPlace(this, dest.name, dest.placeName, id, query)
         NavStateManager.queuedDestination = dest
+        NavStateManager.queuedOutOfSync = NavStateManager.commaFound
         NavStateManager.notifyChanged()
+        if (NavStateManager.queuedOutOfSync) refreshQueuedSyncNetwork()
         return true
     }
 
     /** Cancels the offline queue from the queued chip (Feature 10). */
     private fun cancelQueuedDestination() {
+        val queued = NavStateManager.queuedDestination
         DestinationQueue.clear(this)
         NavStateManager.queuedDestination = null
+        NavStateManager.queuedOutOfSync = false
         NavStateManager.notifyChanged()
+        // Addendum 122: in offline map-app mode the queued destination
+        // IS the local navigation, so cancelling the queue drops it
+        // too. After a flush the queue is already empty, so a
+        // comma-confirmed destination is never cleared from here.
+        if (queued != null && activeDestination?.isSameAs(queued) == true) {
+            clearNavigation(notifySharedState = true, sendClearToComma = false)
+        }
         Toast.makeText(this, "Queued destination cancelled", Toast.LENGTH_SHORT).show()
     }
 
@@ -1583,6 +1702,11 @@ class MainActivity : Activity() {
         notifySharedState: Boolean = true,
         sendToDevice: Boolean = true
     ) {
+        // Queue lock (Param, 2026-11-21) — user sends only; the
+        // telemetry-sync call (notifySharedState = false,
+        // sendToDevice = false) mirrors the comma's own state and is
+        // not a new destination acceptance.
+        if (sendToDevice && notifySharedState && queuedDestinationBlocks(dest)) return
         isNavClearedByUser = false
         NavStateManager.setNavClearedByUser(false)  // re-enable dest syncing from Comma telemetry
         if (::arrivalCard.isInitialized) arrivalCard.hide()
@@ -1620,18 +1744,20 @@ class MainActivity : Activity() {
             val feederError = PhoneGpsFeeder.lastError
             if (ok) PhoneGpsFeeder.startNavigationSession(target) else PhoneGpsFeeder.stop()
             runOnUiThread {
+                if (ok) clearQueueIfMatches(dest)
                 if (feederError != null) {
                     Toast.makeText(this@MainActivity, feederError, Toast.LENGTH_LONG).show()
                 }
                 if (!ok) {
-                    rollbackUnconfirmedDestination(dest)
-                    if (notifySharedState && queueDestinationIfOffline(dest)) {
-                        Toast.makeText(
-                            this,
-                            "Comma offline — destination queued, will send when it connects",
-                            Toast.LENGTH_LONG
-                        ).show()
-                    } else {
+                    // Offline queue (Feature 10, reworked in Addendum
+                    // 122): when the comma is simply unreachable and the
+                    // destination queued, the phone keeps navigating
+                    // locally — map-app mode. No rollback, no toast: the
+                    // queued chip / banner row is the only popup, and
+                    // the queue flushes itself when the comma connects.
+                    val queued = notifySharedState && queueDestinationOnFailure(dest)
+                    if (!queued) {
+                        rollbackUnconfirmedDestination(dest)
                         Toast.makeText(
                             this,
                             "Destination NOT accepted by the comma — ${NavigationManager.lastSendError ?: "no confirmation from the device"}",
@@ -2785,7 +2911,30 @@ class MainActivity : Activity() {
         }
 
         hud.attachTo(root); topBar.attachTo(root)
-        turnBanner.attachTo(root); tripInfoBar.attachTo(root); arrivalCard.attachTo(root); driveSummaryCard.attachTo(root); lastDriveCard.attachTo(root)
+        turnBanner.attachTo(root)
+        // Addendum 127: the four bottom notification cards live in one
+        // vertical dock anchored at the bottom of the screen, so cards
+        // visible at the same time stack instead of overriding each
+        // other. Last Drive sits lowest, directly under the bottom
+        // control strip. The dock reports its laid-out height to the
+        // HUD after every layout pass, and the HUD lifts the bottom
+        // control clusters above the whole stack.
+        val dockDensity = resources.displayMetrics.density
+        fun dockDp(v: Int) = (v * dockDensity).roundToInt()
+        val bottomDock = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.BOTTOM
+                setMargins(dockDp(12), 0, dockDp(12), dockDp(16))
+            }
+        }
+        root.addView(bottomDock)
+        tripInfoBar.attachTo(bottomDock); arrivalCard.attachTo(bottomDock); driveSummaryCard.attachTo(bottomDock); lastDriveCard.attachTo(bottomDock)
+        bottomDock.viewTreeObserver.addOnGlobalLayoutListener {
+            hud.setBottomStackHeight(bottomDock.height)
+        }
         root.addView(createMapPickBanner())
         root.addView(aaScreenView, FrameLayout.LayoutParams(-1, -1))
 

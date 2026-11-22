@@ -38,6 +38,19 @@ class SearchScreen(
     private var isLoading: Boolean = false
     private val searchResults = mutableListOf<NavDestination>()
 
+    // Auto-search after the text settles (voice fix, Param 2026-11-21):
+    // Android Auto delivers a completed voice search as a text change
+    // with no submission, so waiting for onSearchSubmitted left voice
+    // searches with no results at all. When the text has been stable
+    // for AUTO_SEARCH_DELAY_MS, the real search runs — the same
+    // debounce discipline as the phone's search bar.
+    private val autoSearchHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var pendingAutoSearch: Runnable? = null
+
+    /** Incremented by every performSearch; a completion whose
+     * generation is stale (a newer search superseded it) is dropped. */
+    private var searchGeneration = 0
+
     /** Query whose explicit search came back empty (drives the "No results" row). */
     private var noResultsForQuery: String? = null
 
@@ -52,7 +65,10 @@ class SearchScreen(
     }
 
     override fun onSearchTextChanged(searchText: String) {
-        // NO network here — local cached matches only.
+        // Local cached matches render instantly; the network search
+        // follows automatically once the text settles (see
+        // scheduleAutoSearch) — that is also what makes voice search
+        // work, since voice arrives as a text change with no submit.
         // Typing a destination is when the comma needs the phone's position:
         // start feeding on the empty -> non-empty transition. The feeder's
         // 120 s cap and the stop() in onDestinationSelected bound the session.
@@ -76,7 +92,7 @@ class SearchScreen(
         }
         searchQuery = searchText
         noResultsForQuery = null
-        isLoading = false
+        if (searchText.isEmpty()) isLoading = false
         searchResults.clear()
         if (searchText.length >= 2) {
             val starredMatches = Bookmarks.getStarred(carContext).filter {
@@ -92,7 +108,31 @@ class SearchScreen(
                 }
             }
         }
+        scheduleAutoSearch(searchText)
         invalidate()
+    }
+
+    /**
+     * Runs the real search once the text has been stable for
+     * [AUTO_SEARCH_DELAY_MS]. Voice input lands here: Android Auto
+     * delivers the recognized text as a text change and never submits
+     * it, so without this the voice search showed only local matches
+     * (usually none) forever (Param, 2026-11-21).
+     */
+    private fun scheduleAutoSearch(text: String) {
+        cancelPendingAutoSearch()
+        if (text.length < 2) return
+        val runnable = Runnable {
+            pendingAutoSearch = null
+            if (searchQuery == text) performSearch(text)
+        }
+        pendingAutoSearch = runnable
+        autoSearchHandler.postDelayed(runnable, AUTO_SEARCH_DELAY_MS)
+    }
+
+    private fun cancelPendingAutoSearch() {
+        pendingAutoSearch?.let { autoSearchHandler.removeCallbacks(it) }
+        pendingAutoSearch = null
     }
 
     override fun onSearchSubmitted(searchTerm: String) {
@@ -104,6 +144,8 @@ class SearchScreen(
 
     /** Explicit user-initiated search: cache first, network only on a miss. */
     private fun performSearch(query: String) {
+        cancelPendingAutoSearch()
+        val generation = ++searchGeneration
         val cached = SearchCache.lookup(carContext, query)?.takeIf { results ->
             NavStateManager.usePhoneSearch || (results.isNotEmpty() && results.all { it.source == "comma" })
         }
@@ -160,21 +202,39 @@ class SearchScreen(
             }
 
             android.os.Handler(android.os.Looper.getMainLooper()).post {
-                if (source == "comma" && results.isEmpty()) {
-                    NavigationManager.lastCommaSearchError?.let { err ->
-                        CarToast.makeText(carContext, "Comma search: $err", CarToast.LENGTH_LONG).show()
+                // A newer search superseded this one while it ran —
+                // its results own the screen now.
+                if (generation == searchGeneration) {
+                    if (source == "comma" && results.isEmpty()) {
+                        NavigationManager.lastCommaSearchError?.let { err ->
+                            CarToast.makeText(carContext, "Comma search: $err", CarToast.LENGTH_LONG).show()
+                        }
                     }
+                    searchResults.clear()
+                    searchResults.addAll(results)
+                    noResultsForQuery = if (results.isEmpty()) query else null
+                    isLoading = false
+                    invalidate()
                 }
-                searchResults.clear()
-                searchResults.addAll(results)
-                noResultsForQuery = if (results.isEmpty()) query else null
-                isLoading = false
-                invalidate()
             }
         }.start()
     }
 
     private fun onDestinationSelected(dest: NavDestination) {
+        cancelPendingAutoSearch()
+        // Queue lock (Param, 2026-11-21): while a destination is
+        // queued, no NEW destination is accepted — the queued one
+        // must be sent or cancelled first.
+        val queuedNow = NavStateManager.queuedDestination
+            ?: DestinationQueue.loadEntry(carContext)?.displayDestination()
+        if (queuedNow != null && !queuedNow.name.equals(dest.name, ignoreCase = true)) {
+            CarToast.makeText(
+                carContext,
+                "A destination is already queued — it must be sent or cancelled before choosing another",
+                CarToast.LENGTH_LONG
+            ).show()
+            return
+        }
         NavStateManager.markDestinationSelected(dest)
         val feederTarget = client.getEffectiveNavigationEndpoint()
         if (NavStateManager.usePhoneLocationToComma && !feederTarget.isNullOrBlank()) {
@@ -257,6 +317,13 @@ class SearchScreen(
 
             android.os.Handler(android.os.Looper.getMainLooper()).post {
                 if (sendOk) {
+                    // A live send of the queued destination itself
+                    // clears the queue — it is no longer waiting.
+                    if (NavStateManager.queuedDestination?.isSameAs(resolved) == true) {
+                        DestinationQueue.clear(carContext)
+                        NavStateManager.queuedDestination = null
+                        NavStateManager.queuedOutOfSync = false
+                    }
                     DestinationHistory.record(carContext, resolved)
                     NavStateManager.activeDestination = resolved
                     NavStateManager.setNavClearedByUser(false)
@@ -273,29 +340,33 @@ class SearchScreen(
                     CarToast.makeText(carContext, "Navigating to ${resolved.name}", CarToast.LENGTH_SHORT).show()
                     try { screenManager.pop() } catch (e: Exception) { android.util.Log.w("ParamAuto", "Ignored failure: ${e.javaClass.simpleName}: ${e.message}") }
                 } else {
-                    val isOffline = !NavStateManager.commaFound
+                    // Addendum 122/123: queue on ANY send failure —
+                    // offline, or connected but not accepted (out of
+                    // sync). The flush retries every 15 s while the
+                    // comma is connected.
+                    val outOfSync = NavStateManager.commaFound
                     var queued = false
-                    if (isOffline) {
-                        if (resolved.hasCoordinates) {
-                            DestinationQueue.save(carContext, resolved)
-                            NavStateManager.queuedDestination = resolved
+                    if (resolved.hasCoordinates) {
+                        DestinationQueue.save(carContext, resolved)
+                        NavStateManager.queuedDestination = resolved
+                        NavStateManager.queuedOutOfSync = outOfSync
+                        NavStateManager.notifyChanged()
+                        queued = true
+                    } else if (isCommaSuggestion) {
+                        val id = resolvedCandidate.mapboxId?.takeIf { it.isNotBlank() }
+                        val query = searchQuery.trim().ifEmpty { null }
+                        if (id != null || query != null) {
+                            DestinationQueue.saveCommaPlace(carContext, resolvedCandidate.name, resolvedCandidate.placeName, id, query)
+                            NavStateManager.queuedDestination = resolvedCandidate
+                            NavStateManager.queuedOutOfSync = outOfSync
                             NavStateManager.notifyChanged()
                             queued = true
-                        } else if (isCommaSuggestion) {
-                            val id = resolvedCandidate.mapboxId?.takeIf { it.isNotBlank() }
-                            val query = searchQuery.trim().ifEmpty { null }
-                            if (id != null || query != null) {
-                                DestinationQueue.saveCommaPlace(carContext, resolvedCandidate.name, resolvedCandidate.placeName, id, query)
-                                NavStateManager.queuedDestination = resolvedCandidate
-                                NavStateManager.notifyChanged()
-                                queued = true
-                            }
                         }
                     }
                     if (queued) {
                         CarToast.makeText(
                             carContext,
-                            "Comma offline — destination queued, will send when it connects",
+                            DestinationQueue.label(resolved, outOfSync, NavStateManager.commaNetworks),
                             CarToast.LENGTH_LONG
                         ).show()
                         try { screenManager.pop() } catch (e: Exception) { android.util.Log.w("ParamAuto", "Ignored failure: ${e.javaClass.simpleName}: ${e.message}") }
@@ -344,11 +415,12 @@ class SearchScreen(
         if (queuedDest != null && searchQuery.isEmpty()) {
             listBuilder.addItem(
                 Row.Builder()
-                    .setTitle("Queued: ${queuedDest.name}")
-                    .addText("Comma offline · Tap to cancel")
+                    .setTitle(DestinationQueue.label(queuedDest, NavStateManager.queuedOutOfSync, NavStateManager.commaNetworks))
+                    .addText("Tap to cancel")
                     .setOnClickListener {
                         DestinationQueue.clear(carContext)
                         NavStateManager.queuedDestination = null
+                        NavStateManager.queuedOutOfSync = false
                         NavStateManager.notifyChanged()
                         CarToast.makeText(carContext, "Queued destination cancelled", CarToast.LENGTH_SHORT).show()
                         invalidate()
@@ -530,5 +602,11 @@ class SearchScreen(
         }
 
         return builder.build()
+    }
+
+    companion object {
+        /** How long the search text must be stable before the
+         * auto-search runs (voice completion + typing pauses). */
+        const val AUTO_SEARCH_DELAY_MS = 800L
     }
 }

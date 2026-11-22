@@ -96,6 +96,10 @@ class HudOverlay(
      * 2026-11-20: no separate update pill). */
     private var updateReady: Boolean = false
 
+    /** Addendum 126: a user-confirmed install is pending; the badge
+     * shows "Updating…" until the comma finishes it. */
+    private var updatePending: Boolean = false
+
     /** Last device state passed to updateDeviceState, for badge re-renders. */
     private var lastDeviceState: String? = null
 
@@ -773,46 +777,51 @@ class HudOverlay(
 
      */
 
-    private fun applySystemBarInsets(root: FrameLayout) {
+    /** Last navigation-bar inset reported by the window (px). */
+    private var lastNavInsetPx: Int = 0
 
-        val bottomAnchored = listOf(bottomLeftContainer, speedContainer, recenterBtn)
+    /** Clearance the bottom notification dock needs (px); 0 when empty. */
+    private var bottomStackClearancePx: Int = 0
 
-        bottomAnchored.forEach { baseBottomMargin(it) }
+    /**
+     * Addendum 127: the bottom notification dock (MainActivity) reports
+     * its laid-out height after every layout pass; the bottom control
+     * clusters lift above the whole stack. [contentHeightPx] is the
+     * dock's own height — its 16dp bottom margin and an 8dp visual gap
+     * are added here.
+     */
+    fun setBottomStackHeight(contentHeightPx: Int) {
+        val clearance = if (contentHeightPx <= 0) 0 else contentHeightPx + dp(24)
+        if (clearance == bottomStackClearancePx) return
+        bottomStackClearancePx = clearance
+        refreshBottomMargins()
+    }
 
-        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
-
-            val navInset = insets.getInsets(
-
-                androidx.core.view.WindowInsetsCompat.Type.navigationBars()
-
-            ).bottom
-
-            if (navInset > 0) {
-
-                for (view in bottomAnchored) {
-
-                    val lp = view.layoutParams as? FrameLayout.LayoutParams ?: continue
-
-                    val lifted = liftedBottomMargin((view.tag as? Int) ?: 0, navInset)
-
-                    if (lp.bottomMargin != lifted) {
-
-                        lp.bottomMargin = lifted
-
-                        view.layoutParams = lp
-
-                    }
-
-                }
-
+    /** Single writer of the bottom-anchored controls' bottom margins. */
+    private fun refreshBottomMargins() {
+        for (view in listOf(bottomLeftContainer, speedContainer, recenterBtn)) {
+            val lp = view.layoutParams as? FrameLayout.LayoutParams ?: continue
+            val target = stackedBottomMargin(
+                (view.tag as? Int) ?: 0, lastNavInsetPx, bottomStackClearancePx
+            )
+            if (lp.bottomMargin != target) {
+                lp.bottomMargin = target
+                view.layoutParams = lp
             }
-
-            insets
-
         }
+    }
 
+    private fun applySystemBarInsets(root: FrameLayout) {
+        val bottomAnchored = listOf(bottomLeftContainer, speedContainer, recenterBtn)
+        bottomAnchored.forEach { baseBottomMargin(it) }
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
+            lastNavInsetPx = insets.getInsets(
+                androidx.core.view.WindowInsetsCompat.Type.navigationBars()
+            ).bottom
+            refreshBottomMargins()
+            insets
+        }
         androidx.core.view.ViewCompat.requestApplyInsets(root)
-
     }
 
 
@@ -862,6 +871,12 @@ class HudOverlay(
      */
     fun setUpdateReady(ready: Boolean) {
         updateReady = ready
+        renderDeviceStateBadge()
+    }
+
+    /** Addendum 126: a user-confirmed install is pending. */
+    fun setUpdatePending(pending: Boolean) {
+        updatePending = pending
         renderDeviceStateBadge()
     }
 
@@ -1004,35 +1019,11 @@ class HudOverlay(
 
 
     fun setNavActive(active: Boolean) {
-
         altRoutesBtn.visibility = if (active) View.VISIBLE else View.GONE
-
-        val bMargin = if (active) dp(112) else dp(32)
-
-        (bottomLeftContainer.layoutParams as? FrameLayout.LayoutParams)?.let {
-
-            it.setMargins(dp(8), 0, dp(80), bMargin)
-
-            bottomLeftContainer.layoutParams = it
-
-        }
-
-        (speedContainer.layoutParams as? FrameLayout.LayoutParams)?.let {
-
-            it.setMargins(0, 0, dp(16), bMargin)
-
-            speedContainer.layoutParams = it
-
-        }
-
-        (recenterBtn.layoutParams as? FrameLayout.LayoutParams)?.let {
-
-            it.setMargins(0, 0, 0, if (active) dp(112) else dp(80))
-
-            recenterBtn.layoutParams = it
-
-        }
-
+        // Addendum 127: no margin writes here — the bottom clusters'
+        // lift is driven by the notification dock's real height
+        // (setBottomStackHeight). During navigation the TripInfoBar
+        // is a dock child, so the lift follows it automatically.
     }
 
 
@@ -1121,6 +1112,22 @@ class HudOverlay(
     private fun renderDeviceStateBadge() {
 
         if (!::deviceStateBadge.isInitialized) return
+
+        if (updatePending) {
+
+            deviceStateBadge.text = "⬆️ Updating…"
+
+            deviceStateBadge.setTextColor(COLOR_ACCENT_AMBER)
+
+            deviceStateBadge.background = makeCardBg(context, COLOR_BADGE_AMBER_BG, 14, COLOR_ACCENT_AMBER, 1)
+
+            deviceStateBadge.visibility = View.VISIBLE
+
+            deviceStateBadge.setOnClickListener { onUpdateBadgeClick?.invoke() }
+
+            return
+
+        }
 
         if (updateReady) {
 
@@ -1241,9 +1248,13 @@ class HudOverlay(
     fun updateGpu(gpu: GpuStatus?) {
         if (!::gpuPill.isInitialized) return
         gpuPill.text = gpu?.pillText() ?: "GPU —"
+        // The pill's surface is the dark card color in BOTH themes, so
+        // its text stays white — the light theme's dark primary text
+        // on that dark pill was unreadable (found on-device
+        // 2026-11-21, Addendum 127). Amber still marks a dock that
+        // reports nothing.
         gpuPill.setTextColor(
-            if (gpu != null && !gpu.egpuReporting) COLOR_ACCENT_AMBER
-            else if (isNight) Color.WHITE else COLOR_TEXT_PRIMARY_LIGHT
+            if (gpu != null && !gpu.egpuReporting) COLOR_ACCENT_AMBER else Color.WHITE
         )
     }
 

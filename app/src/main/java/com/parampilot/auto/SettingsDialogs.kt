@@ -5207,7 +5207,46 @@ class SettingsDialogs(private val activity: Activity) {
         dialog.show()
     }
 
+    /**
+     * Addendum 126: while an install is pending, the software dialog is
+     * local-only — the quiet rule (connectivity checks only) forbids
+     * the status fetch, and the user must be able to cancel even with
+     * the comma unreachable.
+     */
+    fun showPendingSoftwareUpdateDialog(client: CommaClient?) {
+        val (dialog, body, pal) = createM3Dialog("Comma software", "Update install pending")
+        val card = createGroupCard(pal)
+        card.addView(
+            createKeyValueRow(
+                "Install",
+                "Pending — will install when the comma is available",
+                pal
+            )
+        )
+        body.addView(card)
+        val cancelBtn = createTonalButton("Cancel pending update", pal) {
+            SoftwareUpdateIntentStore.clear(activity)
+            NavStateManager.softwareUpdatePending = false
+            dialog.dismiss()
+            Toast.makeText(activity, "Pending update cancelled", Toast.LENGTH_SHORT).show()
+            showSoftwareUpdateDialog(client)
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, dp(10), 0, 0) }
+        }
+        body.addView(cancelBtn)
+        dialog.show()
+    }
+
     fun showSoftwareUpdateDialog(client: CommaClient?) {
+        // Addendum 126: a pending install short-circuits to the
+        // local-only dialog — no comma requests while updating.
+        if (SoftwareUpdateIntentStore.load(activity) != null) {
+            showPendingSoftwareUpdateDialog(client)
+            return
+        }
         val endpoint = client?.commaIp ?: NavStateManager.commaIp
         if (endpoint.isNullOrBlank() && !NavStateManager.isBleConnected) {
             Toast.makeText(activity, "Connect to Comma first", Toast.LENGTH_SHORT).show()
@@ -5373,20 +5412,44 @@ class SettingsDialogs(private val activity: Activity) {
                             .setMessage("Install the downloaded update now? The comma will reboot and driving assistance will be unavailable until it restarts. The car must be parked.")
                             .setNegativeButton("Cancel", null)
                             .setPositiveButton("Install") { _, _ ->
+                                // Addendum 126: record the intent FIRST, so
+                                // the install keeps retrying (and survives
+                                // an app restart) until the comma finishes
+                                // it — the slow poll drives the retries.
+                                val newPending = SoftwareUpdatePending(
+                                    baseCommit = status.commitShort,
+                                    branch = actionBranch,
+                                    requestedAtMs = System.currentTimeMillis(),
+                                    lastAttemptMs = 0L
+                                )
+                                SoftwareUpdateIntentStore.save(activity, newPending)
+                                NavStateManager.softwareUpdatePending = true
                                 dialog.dismiss()
                                 Thread {
                                     val parked = SettingsRepository(SgGalaxyClient(baseUrl)).isVehicleParked(null)
                                     if (!parked) {
                                         activity.runOnUiThread {
-                                            Toast.makeText(activity, "Shift into Park to install updates", Toast.LENGTH_LONG).show()
+                                            Toast.makeText(activity, "Update saved — will install once parked, when the comma is reachable", Toast.LENGTH_LONG).show()
                                         }
                                     } else {
                                         val (code, resp) = updater.postAction("install", actionBranch.ifEmpty { null })
+                                        val attemptAt = System.currentTimeMillis()
+                                        SoftwareUpdateIntentStore.save(
+                                            activity,
+                                            if (code in 200..299) {
+                                                newPending.copy(
+                                                    lastAttemptMs = attemptAt,
+                                                    acceptedAtMs = attemptAt
+                                                )
+                                            } else {
+                                                newPending.copy(lastAttemptMs = attemptAt)
+                                            }
+                                        )
                                         activity.runOnUiThread {
                                             if (code in 200..299) {
                                                 Toast.makeText(activity, "Install started — the comma will reboot", Toast.LENGTH_LONG).show()
                                             } else {
-                                                Toast.makeText(activity, CommaSoftwareUpdate.errorText(code, resp), Toast.LENGTH_LONG).show()
+                                                Toast.makeText(activity, CommaSoftwareUpdate.errorText(code, resp) + " — update saved, will keep trying", Toast.LENGTH_LONG).show()
                                             }
                                         }
                                     }

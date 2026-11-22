@@ -317,6 +317,17 @@ object NavStateManager {
     @Volatile
     var queuedDestination: NavDestination? = null
 
+    /**
+     * Why the queued destination is waiting (Addendum 122): false =
+     * the comma is unreachable, the entry flushes when it connects;
+     * true = the comma was reached but did not accept the destination
+     * (typically no Internet on the comma) — phone and comma are out
+     * of sync, and the queued indicator asks the user to connect the
+     * comma to the Internet so it can get navigation details.
+     */
+    @Volatile
+    var queuedOutOfSync: Boolean = false
+
     /** Most recent drive from /api/drives/stats (Feature 13); null until polled. */
     @Volatile
     var lastDrive: LastDrive? = null
@@ -332,6 +343,26 @@ object NavStateManager {
     /** Label for the staged update (branch, else installed version). */
     @Volatile
     var softwareUpdateLabel: String? = null
+
+    /** True while a user-confirmed install is pending (Addendum 126). */
+    @Volatile
+    var softwareUpdatePending: Boolean = false
+
+    /** One-shot note about a finished pending install; the UI toasts and clears it. */
+    @Volatile
+    var softwareUpdateCompletionNote: String? = null
+
+    /**
+     * StarPilot channel of the connected comma (Addendum 128).
+     * UNKNOWN until a software status is read; capability checks
+     * resolve UNKNOWN to STABLE (see CommaBranch.kt).
+     */
+    @Volatile
+    var commaBranch: CommaBranch = CommaBranch.UNKNOWN
+
+    /** True only when the comma is positively on the testing channel. */
+    val testingFeaturesEnabled: Boolean
+        get() = testingApiEnabled(commaBranch)
 
     /** Active driving model display name (Feature 15); null while unknown. */
     @Volatile

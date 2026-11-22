@@ -774,6 +774,19 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
     }
 
     private fun startRoute(dest: NavDestination) {
+        // Queue lock (Param, 2026-11-21): while a destination is
+        // queued, no NEW destination is accepted — the queued one
+        // must be sent or cancelled first.
+        val queuedNow = NavStateManager.queuedDestination
+            ?: DestinationQueue.loadEntry(carContext)?.displayDestination()
+        if (DestinationQueue.blocksNewDestination(queuedNow, dest)) {
+            CarToast.makeText(
+                carContext,
+                "A destination is already queued — it must be sent or cancelled before choosing another",
+                CarToast.LENGTH_LONG
+            ).show()
+            return
+        }
         NavStateManager.markDestinationSelected(dest)
         val feederTarget = client.getEffectiveNavigationEndpoint()
         if (NavStateManager.usePhoneLocationToComma && !feederTarget.isNullOrBlank()) {
@@ -791,6 +804,13 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
             }
             mainHandler.post {
                 if (sendOk) {
+                    // A live send of the queued destination itself
+                    // clears the queue — it is no longer waiting.
+                    if (NavStateManager.queuedDestination?.isSameAs(dest) == true) {
+                        DestinationQueue.clear(carContext)
+                        NavStateManager.queuedDestination = null
+                        NavStateManager.queuedOutOfSync = false
+                    }
                     // Confirmed: the entry feed becomes a navigation
                     // session and runs until navigation ends (Param,
                     // 2026-11-03).
@@ -814,16 +834,22 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
                     try { invalidate() } catch (e: Exception) { android.util.Log.w("ParamAuto", "Ignored failure: ${e.javaClass.simpleName}: ${e.message}") }
                 } else {
                     PhoneGpsFeeder.stop()
-                    val queued = !NavStateManager.commaFound && dest.hasCoordinates && run {
+                    // Addendum 122/123: queue on ANY send failure —
+                    // offline, or connected but not accepted (out of
+                    // sync). The flush retries every 15 s while the
+                    // comma is connected.
+                    val outOfSync = NavStateManager.commaFound
+                    val queued = dest.hasCoordinates && run {
                         DestinationQueue.save(carContext, dest)
                         NavStateManager.queuedDestination = dest
+                        NavStateManager.queuedOutOfSync = outOfSync
                         NavStateManager.notifyChanged()
                         true
                     }
                     if (queued) {
                         CarToast.makeText(
                             carContext,
-                            "Comma offline — destination queued, will send when it connects",
+                            DestinationQueue.label(dest, outOfSync, NavStateManager.commaNetworks),
                             CarToast.LENGTH_LONG
                         ).show()
                     } else {
