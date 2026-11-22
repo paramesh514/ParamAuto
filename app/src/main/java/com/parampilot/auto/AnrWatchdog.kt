@@ -22,6 +22,9 @@ import java.util.concurrent.atomic.AtomicLong
  * external app files `/sdcard/Android/data/com.bogala.paramauto/files/`
  * with fallback to internal `filesDir`) so it can be pulled or inspected
  * via `adb` without interrupting the driver with a popup dialog.
+ * A gap the watchdog thread itself slept through (process frozen /
+ * device suspended) is a process stall, not a freeze, and is discarded
+ * the same way — see AnrReport.isProcessStall (2026-11-21).
  */
 object AnrWatchdog {
 
@@ -34,6 +37,7 @@ object AnrWatchdog {
     const val REPORT_LOG_FILE_NAME = "anr_freeze_reports.log"
     private const val TICK_MS = 2000L
     private const val BLOCK_MS = 5000L
+    private const val CHECK_MS = 1000L
 
     private val started = AtomicBoolean(false)
     private val lastTickMs = AtomicLong(0L)
@@ -51,13 +55,21 @@ object AnrWatchdog {
         }
         mainHandler.postDelayed(ticker, TICK_MS)
         Thread {
+            var lastWakeMs = System.currentTimeMillis()
             while (true) {
                 try {
-                    Thread.sleep(1000L)
+                    Thread.sleep(CHECK_MS)
                 } catch (e: InterruptedException) {
                     return@Thread
                 }
                 val now = System.currentTimeMillis()
+                // How late this check itself woke. In a genuine
+                // main-thread block the watchdog thread runs on time
+                // (lag ~0); when the whole process was frozen or the
+                // device suspended, the watchdog slept through the
+                // same span as the ticker — see AnrReport.isProcessStall.
+                val watchdogLagMs = maxOf(0L, (now - lastWakeMs) - CHECK_MS)
+                lastWakeMs = now
                 val tick = lastTickMs.get()
                 if (!AnrReport.isBlocked(tick, now, BLOCK_MS)) {
                     reportedThisEpisode = false
@@ -65,6 +77,15 @@ object AnrWatchdog {
                 }
                 if (reportedThisEpisode) continue
                 if (!isForegroundOrVisible(app)) continue
+                if (AnrReport.isProcessStall(now - tick, watchdogLagMs, TICK_MS + CHECK_MS)) {
+                    reportedThisEpisode = true
+                    Log.i(
+                        TAG,
+                        "Watchdog capture discarded: process stall " +
+                            "(watchdog itself delayed ${watchdogLagMs}ms of the ${now - tick}ms gap)."
+                    )
+                    continue
+                }
                 reportedThisEpisode = true
                 try {
                     capture(app, now - tick, now)

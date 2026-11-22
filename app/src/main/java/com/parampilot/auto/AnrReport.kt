@@ -40,6 +40,24 @@ object AnrReport {
         return !appFrame
     }
 
+    /** Process-stall rule (Param, 2026-11-21; from the first ADB
+     *  pull of the phone's own reports): a "block" whose span the
+     *  watchdog thread itself slept through is not a main-thread
+     *  freeze. The watchdog and the ticker live in the same process,
+     *  so when Android freezes the process (cached-app freezer) or
+     *  the device suspends, BOTH stop; on thaw the wall-clock gap
+     *  reads as minutes of "blocked" time — field reports claimed
+     *  20–62 minutes while parked, with stacks showing the main
+     *  thread idle in its looper. [watchdogLagMs] is how late the
+     *  watchdog's own periodic check woke; when that lag plus
+     *  [slackMs] (one tick + one check of phase slop) covers the
+     *  main thread's whole gap, the stall was process-wide and
+     *  gets NO report. A genuine main-thread block leaves the
+     *  watchdog thread running on time (lag ≈ 0), so real freezes
+     *  still report exactly as before. */
+    fun isProcessStall(mainGapMs: Long, watchdogLagMs: Long, slackMs: Long): Boolean =
+        watchdogLagMs + slackMs >= mainGapMs
+
     /** The report Param sends back: identity + state first, then
      *  the main thread's stack exactly as captured. */
     fun format(
