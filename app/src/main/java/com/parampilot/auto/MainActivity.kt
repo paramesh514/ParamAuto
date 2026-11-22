@@ -1224,34 +1224,10 @@ class MainActivity : Activity() {
             val padV = (110 * resources.displayMetrics.density).roundToInt()
             map.animateCamera(CameraUpdateFactory.newLatLngBounds(builder.build(), padH, padV, padH, padV), 700)
             if (activeRoutes.isNotEmpty()) hud.showRoutes(activeRoutes, selectedRouteId) { selectRoute(it, keepOverviewIfActive = true) }
-            // Route picker (Feature 7): with more than one route, offer the
-            // list picker on top of the overview; a single route keeps the
-            // plain overview behavior.
-            if (activeRoutes.size > 1) showRoutesPicker()
+            // No route picker popup (Param, 2026-11-21): the overview zooms
+            // out to the entire route and the user selects by tapping a
+            // route chip or an alternative-route marker on the map.
         } else { recenterToVehicle() }
-    }
-
-    /**
-     * Route alternatives picker (Feature 7): one row per comma route with
-     * its device-provided totals. A tap runs the existing selectRoute
-     * path; the picker closes only when the comma confirms the selection
-     * — on failure it stays open and selectRoute's error toast shows,
-     * the same discipline as the End Route flow.
-     */
-    private fun showRoutesPicker() {
-        val routes = NavStateManager.activeRoutes.ifEmpty { activeRoutes }
-        if (routes.size <= 1) return
-        val labels = routes.map { RouteRow.label(it, it.id == selectedRouteId) }.toTypedArray()
-        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Choose route")
-            .setItems(labels) { dialog, which ->
-                val chosen = routes[which]
-                selectRoute(chosen, keepOverviewIfActive = false, onResult = { ok ->
-                    if (ok) dialog.dismiss()
-                })
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
     }
 
     private var latestSearchQuery: String = ""
