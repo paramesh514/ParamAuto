@@ -1,14 +1,6 @@
 package com.parampilot.auto
 
 import android.app.Activity
-import android.app.AlertDialog
-import android.graphics.Color
-import android.graphics.Typeface
-import android.view.ViewGroup
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.TextView
-import kotlin.math.roundToInt
 
 /**
  * GPU details dialog (Param's ask, 2026-11-06 — the last feature
@@ -17,39 +9,16 @@ import kotlin.math.roundToInt
  * layer-2 [GpuStatus] from the payload the poll already stores.
  * Fields the dock isn't reporting render as "—", exactly like
  * Galaxy's own System Monitor page — nothing is invented.
+ *
+ * Addendum 132: rendered as an M3 sheet (M3Sheet), like Settings.
  */
 object GpuDialog {
 
     fun show(activity: Activity) {
-        val den = activity.resources.displayMetrics.density
-        fun dp(v: Int) = (v * den).roundToInt()
+        val (dialog, body, pal) = M3Sheet.create(activity, "GPU")
 
-        val body = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            background = HudOverlay.makeCardBg(activity, HudOverlay.COLOR_SURFACE_DARK, 0)
-            setPadding(dp(20), dp(16), dp(20), dp(16))
-        }
-
-        fun addRow(label: String, value: String) {
-            val rowLabel = TextView(activity).apply {
-                text = label
-                textSize = 12f
-                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-                setTextColor(HudOverlay.COLOR_TEXT_MUTED)
-                setPadding(0, dp(10), 0, 0)
-            }
-            body.addView(rowLabel)
-            val rowValue = TextView(activity).apply {
-                text = value
-                textSize = 15f
-                typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-                setTextColor(Color.WHITE)
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-                )
-            }
-            body.addView(rowValue)
-        }
+        fun addRow(label: String, value: String) =
+            M3Sheet.addRow(body, activity, pal, label, value)
 
         val monitor = NavStateManager.lastSystemMonitor
         val gpu = GpuStatus.parse(monitor)
@@ -86,11 +55,12 @@ object GpuDialog {
             }
         }
 
-        val scroll = ScrollView(activity).apply { addView(body) }
-        AlertDialog.Builder(activity)
-            .setTitle("GPU")
-            .setView(scroll)
-            .setPositiveButton("Done", null)
-            .show()
+        body.addView(
+            M3Sheet.buttonRow(
+                activity,
+                M3Sheet.primaryButton(activity, pal, "Done") { dialog.dismiss() }
+            )
+        )
+        dialog.show()
     }
 }

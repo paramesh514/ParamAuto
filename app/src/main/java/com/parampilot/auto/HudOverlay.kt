@@ -129,6 +129,7 @@ class HudOverlay(
     private lateinit var speedUnitView: TextView
 
     private lateinit var routesBar: LinearLayout
+    private lateinit var routesScroll: android.widget.HorizontalScrollView
 
     private lateinit var recenterBtn: TextView
 
@@ -404,13 +405,27 @@ class HudOverlay(
      * attachTo, route option chips (extracted 2026-11-08): the overview-mode alternatives bar below the top bar.
      */
     private fun buildRoutesBar(root: FrameLayout) {
-        // Route Option Chips (below top bar during overview mode)
+        // Route Option Chips (below top bar during overview mode).
+        // Addendum 132: the chip row lives in a horizontal scroll view —
+        // as a fixed row, three or more chips overflowed the screen and
+        // the later routes could not be tapped (Param's screenshot,
+        // 2026-11-21: second chip ellipsised, third off-screen).
 
         routesBar = LinearLayout(context).apply {
 
             orientation = LinearLayout.HORIZONTAL
 
             gravity = Gravity.CENTER
+
+            layoutParams = android.view.ViewGroup.LayoutParams(-2, -2)
+
+        }
+
+        routesScroll = android.widget.HorizontalScrollView(context).apply {
+
+            isHorizontalScrollBarEnabled = false
+
+            overScrollMode = View.OVER_SCROLL_NEVER
 
             visibility = View.GONE
 
@@ -422,9 +437,11 @@ class HudOverlay(
 
             }
 
+            addView(routesBar)
+
         }
 
-        root.addView(routesBar)
+        root.addView(routesScroll)
     }
 
     /**
@@ -800,9 +817,16 @@ class HudOverlay(
     private fun refreshBottomMargins() {
         for (view in listOf(bottomLeftContainer, speedContainer, recenterBtn)) {
             val lp = view.layoutParams as? FrameLayout.LayoutParams ?: continue
-            val target = stackedBottomMargin(
-                (view.tag as? Int) ?: 0, lastNavInsetPx, bottomStackClearancePx
-            )
+            val base = (view.tag as? Int) ?: 0
+            val target = if (view === recenterBtn) {
+                // Addendum 132: when a notification stack lifts the
+                // bottom cluster, the centred Re-center pill rides
+                // above the cluster's badge/pill row (48dp ≈ the
+                // 34dp row plus a gap) instead of covering it.
+                recenterBottomMargin(base, lastNavInsetPx, bottomStackClearancePx, dp(48))
+            } else {
+                stackedBottomMargin(base, lastNavInsetPx, bottomStackClearancePx)
+            }
             if (lp.bottomMargin != target) {
                 lp.bottomMargin = target
                 view.layoutParams = lp
@@ -953,7 +977,7 @@ class HudOverlay(
 
         if (routes.size <= 1) {
 
-            routesBar.visibility = View.GONE
+            routesScroll.visibility = View.GONE
 
             return
 
@@ -1007,13 +1031,15 @@ class HudOverlay(
 
         }
 
-        routesBar.visibility = View.VISIBLE
+        routesScroll.visibility = View.VISIBLE
+
+        routesScroll.scrollTo(0, 0)
 
     }
 
 
 
-    fun hideRoutes() { routesBar.visibility = View.GONE }
+    fun hideRoutes() { routesScroll.visibility = View.GONE }
 
 
 
@@ -1280,13 +1306,13 @@ class HudOverlay(
 
             when (StaleDataPolicy.band(ageMs, isBt)) {
 
-                StaleDataPolicy.Band.LIVE_NOW -> { latestFreshnessText = "LIVE \u00B7 just now"; freshnessDotOverride = null }
+                StaleDataPolicy.Band.LIVE_NOW -> { latestFreshnessText = "LIVE"; freshnessDotOverride = null }
 
-                StaleDataPolicy.Band.LIVE -> { latestFreshnessText = "LIVE \u00B7 ${ageText} ago"; freshnessDotOverride = null }
+                StaleDataPolicy.Band.LIVE -> { latestFreshnessText = "LIVE \u00B7 ${ageText}"; freshnessDotOverride = null }
 
-                StaleDataPolicy.Band.STALE -> { latestFreshnessText = "STALE \u00B7 ${ageText} ago"; freshnessDotOverride = COLOR_ACCENT_AMBER }
+                StaleDataPolicy.Band.STALE -> { latestFreshnessText = "STALE \u00B7 ${ageText}"; freshnessDotOverride = COLOR_ACCENT_AMBER }
 
-                StaleDataPolicy.Band.OFFLINE -> { latestFreshnessText = "OFFLINE \u00B7 ${ageText} ago"; freshnessDotOverride = COLOR_ACCENT_RED }
+                StaleDataPolicy.Band.OFFLINE -> { latestFreshnessText = "OFFLINE \u00B7 ${ageText}"; freshnessDotOverride = COLOR_ACCENT_RED }
 
             }
 
