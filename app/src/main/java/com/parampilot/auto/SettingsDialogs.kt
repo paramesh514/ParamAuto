@@ -1063,8 +1063,8 @@ class SettingsDialogs(private val activity: Activity) {
         navCard.addView(
             createSettingsRow(
                 iconKind = SettingsIconView.Kind.SPEED,
-                title = "Speed limit offsets",
-                subtitle = "Configure speed band offsets (+mph)",
+                title = "Speed limit assist",
+                subtitle = "Offsets, sources & confirmation — on the comma",
                 iconTint = pal.accentGreen,
                 iconTileBg = pal.accentGreenTonalBg,
                 pal = pal
@@ -4892,7 +4892,7 @@ class SettingsDialogs(private val activity: Activity) {
         val endpoint = client?.commaIp ?: NavStateManager.commaIp
         val sg = SgGalaxyClient(SgGalaxyClient.baseUrlFor(endpoint ?: "127.0.0.1"))
         val (dialog, body, pal) = createM3Dialog(
-            "Speed limit offsets",
+            "Speed limit assist",
             "Read from the comma just now · read-only"
         )
         val loading = TextView(activity).apply {
@@ -5708,7 +5708,7 @@ class SettingsDialogs(private val activity: Activity) {
         val repo = SettingsRepository(SgGalaxyClient(baseUrl))
         val currentOffsets = NavStateManager.sgOffsetsMph
         if (currentOffsets == null) {
-            Toast.makeText(activity, "Fetching speed limit offsets from device...", Toast.LENGTH_SHORT).show()
+            Toast.makeText(activity, "Fetching speed limit assist from device...", Toast.LENGTH_SHORT).show()
             Thread {
                 val fetched = SgGalaxyClient(baseUrl).fetchSlcOffsets()
                 activity.runOnUiThread {
@@ -5726,7 +5726,7 @@ class SettingsDialogs(private val activity: Activity) {
         val isParked = repo.isVehicleParked(devState)
 
         val (dialog, body, pal) = createM3Dialog(
-            "Speed limit offsets",
+            "Speed limit assist",
             if (isParked) "Tap a speed band to adjust offset" else "Shift into Park to modify"
         )
 
@@ -5763,7 +5763,240 @@ class SettingsDialogs(private val activity: Activity) {
             )
         }
         body.addView(card)
+        // Addendum 139: the rest of Galaxy's Speed Limit Controller
+        // page (the controller toggle, sign display, confirmation
+        // policy, source pickers, reset) loads under the band card.
+        attachSlcAssistExtras(client, baseUrl, body, pal, dialog)
         dialog.show()
+    }
+
+    /** The comma's own error words for a settings call, as in the generic page dialog. */
+    private fun slcErrorText(resp: JSONObject?, code: Int): String {
+        val server = resp?.optString("error", "")?.ifEmpty { null }
+        return when {
+            code == 401 ->
+                (server ?: "Sign in to Galaxy") +
+                    " — settings need a local or Bluetooth connection"
+            server != null -> server
+            code == -1 || code == 0 ->
+                "The comma didn't answer — check the connection"
+            else -> "Comma answered HTTP $code"
+        }
+    }
+
+    /**
+     * Addendum 139: fetch the comma's slc page in one Galaxy session
+     * and append its non-offset settings as a second card in the
+     * Speed limit assist sheet. Writes run the preview -> confirm
+     * flow in that same session (a preview intent is bound to the
+     * session that created it); success and failure both land back
+     * on a freshly opened sheet, and failures surface the comma's
+     * own error first.
+     */
+    private fun attachSlcAssistExtras(
+        client: CommaClient?,
+        baseUrl: String,
+        body: LinearLayout,
+        pal: M3Palette,
+        dialog: Dialog
+    ) {
+        val sgClient = SgGalaxyClient(baseUrl)
+        Thread {
+            val (code, resp) = sgClient.fetchSettingsPage("slc")
+            val page = GalaxySettings.parsePage(resp)
+            activity.runOnUiThread {
+                if (!dialog.isShowing) return@runOnUiThread
+                if (code != 200 || page == null) {
+                    body.addView(TextView(activity).apply {
+                        text = "The comma's other speed-limit settings " +
+                            "couldn't load (${slcErrorText(resp, code)})."
+                        dpText(13f)
+                        setTextColor(pal.textSecondary)
+                        setPadding(dp(4), dp(10), dp(4), 0)
+                    })
+                    return@runOnUiThread
+                }
+                val extras = GalaxySettings.slcAssistExtras(page)
+                if (extras.isEmpty()) return@runOnUiThread
+                val card = createGroupCard(pal)
+                extras.forEachIndexed { pos, (index, rawRow) ->
+                    if (pos > 0) card.addView(createDivider(pal))
+                    card.addView(
+                        slcExtraRow(
+                            client, sgClient, page, index,
+                            GalaxySettings.presented(rawRow), pal, dialog
+                        )
+                    )
+                }
+                body.addView(card)
+            }
+        }.start()
+    }
+
+    /** One non-offset slc row in the assist sheet, by control type. */
+    private fun slcExtraRow(
+        client: CommaClient?,
+        sgClient: SgGalaxyClient,
+        page: GalaxySettings.Page,
+        index: Int,
+        row: GalaxySettings.Row,
+        pal: M3Palette,
+        dialog: Dialog
+    ): View {
+        if (!row.available) {
+            return createSettingsRow(
+                iconKind = SettingsIconView.Kind.SPEED,
+                title = row.label,
+                subtitle = row.reason,
+                badgeText = GalaxySettings.valueWithUnit(row).ifEmpty { null },
+                badgeActive = false,
+                pal = pal
+            ) {
+                if (row.reason.isNotEmpty()) {
+                    Toast.makeText(activity, row.reason, Toast.LENGTH_LONG).show()
+                }
+            }.apply { alpha = 0.55f }
+        }
+        return when (GalaxySettings.control(row)) {
+            GalaxySettings.Control.SWITCH -> createSwitchRow(
+                iconKind = SettingsIconView.Kind.SPEED,
+                title = row.label,
+                subtitle = row.reason,
+                initialChecked = row.value == "On",
+                pal = pal,
+                subtitleMaxLines = 2
+            ) { checked ->
+                commitSlcExtraValue(
+                    client, sgClient, page, index,
+                    if (checked) "On" else "Off", dialog
+                )
+            }
+            GalaxySettings.Control.SELECT -> createSettingsRow(
+                iconKind = SettingsIconView.Kind.SPEED,
+                title = row.label,
+                subtitle = row.reason,
+                badgeText = row.value.ifEmpty { null },
+                badgeActive = true,
+                pal = pal
+            ) {
+                showSheetListPicker(row.label, row.choices, row.value) { picked ->
+                    commitSlcExtraValue(client, sgClient, page, index, picked, dialog)
+                }
+            }
+            GalaxySettings.Control.ACTION -> createSettingsRow(
+                iconKind = SettingsIconView.Kind.SPEED,
+                title = row.label,
+                subtitle = row.reason,
+                badgeText = GalaxySettings.actionLabel(row),
+                badgeActive = false,
+                pal = pal
+            ) {
+                reviewSlcExtraAction(client, sgClient, page, index, row, dialog)
+            }
+            else -> createSettingsRow(
+                iconKind = SettingsIconView.Kind.SPEED,
+                title = row.label,
+                subtitle = row.reason,
+                badgeText = GalaxySettings.valueWithUnit(row).ifEmpty { null },
+                badgeActive = false,
+                pal = pal
+            ) {}
+        }
+    }
+
+    /** Preview -> confirm for one assist-sheet value edit. */
+    private fun commitSlcExtraValue(
+        client: CommaClient?,
+        sgClient: SgGalaxyClient,
+        page: GalaxySettings.Page,
+        index: Int,
+        value: Any,
+        dialog: Dialog
+    ) {
+        Thread {
+            val (code, resp) = sgClient.postSettingsPreview(
+                GalaxySettings.previewValueBody(page.view, index, value)
+            )
+            val intent = resp?.optString("intent", "")?.ifEmpty { null }
+            activity.runOnUiThread {
+                if (!dialog.isShowing) return@runOnUiThread
+                if (code == 200 && intent != null) {
+                    confirmSlcExtraIntent(client, sgClient, intent, dialog)
+                } else {
+                    Toast.makeText(
+                        activity, slcErrorText(resp, code), Toast.LENGTH_LONG
+                    ).show()
+                    dialog.dismiss()
+                    showSlcOffsetDialog(client)
+                }
+            }
+        }.start()
+    }
+
+    /** Direction preview for an assist-sheet action row, then the comma's own question. */
+    private fun reviewSlcExtraAction(
+        client: CommaClient?,
+        sgClient: SgGalaxyClient,
+        page: GalaxySettings.Page,
+        index: Int,
+        row: GalaxySettings.Row,
+        dialog: Dialog
+    ) {
+        Thread {
+            val (code, resp) = sgClient.postSettingsPreview(
+                GalaxySettings.previewDirectionBody(
+                    page.view, index, if (row.confirm) 0 else 1
+                )
+            )
+            val intent = resp?.optString("intent", "")?.ifEmpty { null }
+            val question = resp?.optString("question", "")
+            activity.runOnUiThread {
+                if (!dialog.isShowing) return@runOnUiThread
+                if (code == 200 && intent != null) {
+                    showSheetConfirm(
+                        title = row.label,
+                        message = question?.ifEmpty { null } ?: "Apply this change?",
+                        positiveLabel = "Confirm",
+                        onPositive = {
+                            confirmSlcExtraIntent(client, sgClient, intent, dialog)
+                        }
+                    )
+                } else {
+                    Toast.makeText(
+                        activity, slcErrorText(resp, code), Toast.LENGTH_LONG
+                    ).show()
+                    dialog.dismiss()
+                    showSlcOffsetDialog(client)
+                }
+            }
+        }.start()
+    }
+
+    /** Confirm a previewed assist-sheet intent; land back on the fresh sheet either way. */
+    private fun confirmSlcExtraIntent(
+        client: CommaClient?,
+        sgClient: SgGalaxyClient,
+        intent: String,
+        dialog: Dialog
+    ) {
+        Thread {
+            val (code, resp) = sgClient.postSettingsConfirm(
+                GalaxySettings.confirmBody(intent, "slc")
+            )
+            activity.runOnUiThread {
+                if (code == 200 && resp?.optBoolean("saved", false) == true) {
+                    Toast.makeText(
+                        activity, "Saved on the comma", Toast.LENGTH_SHORT
+                    ).show()
+                } else {
+                    Toast.makeText(
+                        activity, slcErrorText(resp, code), Toast.LENGTH_LONG
+                    ).show()
+                }
+                if (dialog.isShowing) dialog.dismiss()
+                showSlcOffsetDialog(client)
+            }
+        }.start()
     }
 
     private fun showBandAdjustmentDialog(
