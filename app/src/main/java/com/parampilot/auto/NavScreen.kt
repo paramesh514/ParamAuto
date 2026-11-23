@@ -916,14 +916,14 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
         }
     }
 
-    /** The current car-screen notice text (Addendum 142), decided
-     * in layer 2 ([CarScreenNotice]) from shared state. */
+    /** The current car-screen notice text (Addendum 142/143),
+     * decided in layer 2 ([CarScreenNotice]) from shared state. */
     private fun currentNoticeText(): String? = CarScreenNotice.navNotice(
         queued = NavStateManager.queuedDestination,
         outOfSync = NavStateManager.queuedOutOfSync,
         networks = NavStateManager.commaNetworks,
         hasActiveRoute = NavStateManager.activeDestination != null,
-        phoneHasInternet = PhoneConnectivity.hasInternet(carContext)
+        scenario = ConnectivityMatrix.current()
     )
 
     private fun buildNavTemplate(): Template {

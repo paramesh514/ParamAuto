@@ -165,6 +165,20 @@ class SearchScreen(
             return
         }
 
+        // Connectivity matrix (Addendum 143): scenario 4 (both
+        // sides offline) has no network search to run — land on
+        // the empty state at once; the row names the blocker.
+        // Scenario 2 forces the comma branch below.
+        val scenario = ConnectivityMatrix.current()
+        if (!ConnectivityMatrix.searchAllowed(scenario)) {
+            searchResults.clear()
+            noResultsForQuery = query
+            lastSearchCommaError = null
+            isLoading = false
+            invalidate()
+            return
+        }
+
         isLoading = true
         invalidate()
         Thread {
@@ -178,7 +192,9 @@ class SearchScreen(
             var source = "photon"
             val commaEndpoint = client.commaIp ?: NavStateManager.commaIp
 
-            val results: List<NavDestination> = if (!NavStateManager.usePhoneSearch) {
+            val results: List<NavDestination> = if (
+                ConnectivityMatrix.useCommaSearch(scenario, NavStateManager.usePhoneSearch)
+            ) {
                 source = "comma"
                 if (!commaEndpoint.isNullOrBlank()) {
                     navManager.searchPlacesCommaSg(query, SgGalaxyClient.baseUrlFor(commaEndpoint))
@@ -462,7 +478,7 @@ class SearchScreen(
                     .setTitle(
                         CarScreenNotice.searchEmptyText(
                             searchQuery,
-                            PhoneConnectivity.hasInternet(carContext),
+                            NavStateManager.phoneInternet,
                             lastSearchCommaError
                         )
                     )
