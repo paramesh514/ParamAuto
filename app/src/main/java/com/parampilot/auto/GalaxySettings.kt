@@ -293,6 +293,27 @@ object GalaxySettings {
         }
     }
 
+    /**
+     * Addendum 139: the slc page's rows OTHER than the band offsets
+     * and their status lines — the settings the "Speed limit assist"
+     * sheet adds under its band card (the controller toggle, sign
+     * display, confirmation policy, adopt-early and pedal-override
+     * choices, the source pickers, the reset action). The band
+     * offsets classify as SLIDERs and the policy / zero-offset
+     * lines as READOUTs; everything else the driver can change on
+     * the page is a SWITCH, SELECT or ACTION. Returns (page row
+     * index, row) pairs — the settings protocol addresses rows by
+     * index.
+     */
+    fun slcAssistExtras(page: Page): List<Pair<Int, Row>> =
+        page.rows.mapIndexedNotNull { index, row ->
+            when (control(row)) {
+                Control.SWITCH, Control.SELECT, Control.ACTION ->
+                    index to row
+                else -> null
+            }
+        }
+
     // ---- request bodies (exact key sets; the server rejects extras) ----
 
     fun previewValueBody(view: String, row: Int, value: Any): JSONObject {
