@@ -25,6 +25,7 @@ import androidx.core.graphics.drawable.IconCompat
 import androidx.car.app.navigation.model.Lane
 import androidx.car.app.navigation.model.LaneDirection
 import androidx.car.app.navigation.model.Maneuver
+import androidx.car.app.navigation.model.MessageInfo
 import androidx.car.app.navigation.model.Destination
 import androidx.car.app.navigation.model.Trip
 import androidx.car.app.navigation.model.NavigationTemplate
@@ -74,6 +75,11 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
     private var isCarNavActive: Boolean = false
     private var lastTemplateInvalidateMs: Long = 0
     private var lastKnownCue: String? = null
+
+    /** Last notice text computed for the car nav screen (Addendum
+     * 142); a change forces a template rebuild so the card appears
+     * and clears without waiting for a navigation event. */
+    private var lastNoticeText: String? = ""
 
     @Volatile
     private var interpolatedGps: GpsPosition? = null
@@ -156,6 +162,15 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
         val currentCue = NavStateManager.activeTurnCue
         if (currentCue != lastKnownCue) {
             lastKnownCue = currentCue
+            forceInvalidate = true
+        }
+
+        // Addendum 142: a notice change (queued destination set or
+        // cleared, internet lost or regained) rebuilds the template
+        // so the MessageInfo card tracks reality on its own.
+        val noticeText = currentNoticeText()
+        if (noticeText != lastNoticeText) {
+            lastNoticeText = noticeText
             forceInvalidate = true
         }
 
@@ -901,6 +916,16 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
         }
     }
 
+    /** The current car-screen notice text (Addendum 142), decided
+     * in layer 2 ([CarScreenNotice]) from shared state. */
+    private fun currentNoticeText(): String? = CarScreenNotice.navNotice(
+        queued = NavStateManager.queuedDestination,
+        outOfSync = NavStateManager.queuedOutOfSync,
+        networks = NavStateManager.commaNetworks,
+        hasActiveRoute = NavStateManager.activeDestination != null,
+        phoneHasInternet = PhoneConnectivity.hasInternet(carContext)
+    )
+
     private fun buildNavTemplate(): Template {
         val pkt = NavStateManager.latestPacket ?: latest
         val dest = NavStateManager.activeDestination
@@ -923,7 +948,18 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
                 .addAction(workAction)
                 .build()
 
+            // Addendum 142: when navigation cannot work right now
+            // (a destination is queued, or the phone has no
+            // internet), the idle template carries a MessageInfo
+            // card saying so — until now this screen said nothing
+            // and a failed send looked like nothing had happened.
+            val notice = currentNoticeText()
             return templateBuilder
+                .apply {
+                    if (notice != null) {
+                        setNavigationInfo(MessageInfo.Builder(CarText.create(notice)).build())
+                    }
+                }
                 .setActionStrip(actionStrip)
                 .build()
         }

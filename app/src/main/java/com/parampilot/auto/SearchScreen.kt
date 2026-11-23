@@ -54,6 +54,11 @@ class SearchScreen(
     /** Query whose explicit search came back empty (drives the "No results" row). */
     private var noResultsForQuery: String? = null
 
+    /** The comma search's own error for the last empty completion
+     * (Addendum 142): lets the empty row say the search FAILED
+     * instead of claiming no results exist. */
+    private var lastSearchCommaError: String? = null
+
     init {
         // Backstop: if this screen is torn down mid-entry (popped, session
         // ended), destination entry is over — stop feeding phone GPS.
@@ -154,6 +159,7 @@ class SearchScreen(
             searchResults.clear()
             searchResults.addAll(cached)
             noResultsForQuery = if (cached.isEmpty()) query else null
+            lastSearchCommaError = null
             isLoading = false
             invalidate()
             return
@@ -213,6 +219,12 @@ class SearchScreen(
                     searchResults.clear()
                     searchResults.addAll(results)
                     noResultsForQuery = if (results.isEmpty()) query else null
+                    lastSearchCommaError =
+                        if (results.isEmpty() && source == "comma") {
+                            NavigationManager.lastCommaSearchError
+                        } else {
+                            null
+                        }
                     isLoading = false
                     invalidate()
                 }
@@ -447,7 +459,13 @@ class SearchScreen(
         } else if (!isLoading && noResultsForQuery != null && noResultsForQuery == searchQuery) {
             listBuilder.addItem(
                 Row.Builder()
-                    .setTitle("No results found for \"$searchQuery\"")
+                    .setTitle(
+                        CarScreenNotice.searchEmptyText(
+                            searchQuery,
+                            PhoneConnectivity.hasInternet(carContext),
+                            lastSearchCommaError
+                        )
+                    )
                     .build()
             )
         } else if (searchQuery.isEmpty() && !isLoading) {
