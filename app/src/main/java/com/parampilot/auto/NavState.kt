@@ -195,15 +195,25 @@ data class TelemetryPacket(
         @Volatile
         private var lastKnownLimitMs: Double = 0.0
 
-        /** SLC band lookup shared by both builders: bands are Offset1..7 (0-24, 25-34, ..., 75+ mph). */
-        private fun bandOffsetMph(limitMph: Double, offsetAt: (Int) -> Double): Double = when {
-            limitMph < 25 -> offsetAt(0)
-            limitMph < 35 -> offsetAt(1)
-            limitMph < 45 -> offsetAt(2)
-            limitMph < 55 -> offsetAt(3)
-            limitMph < 65 -> offsetAt(4)
-            limitMph < 75 -> offsetAt(5)
-            else -> offsetAt(6)
+        /**
+         * SLC band lookup shared by both builders. The comparison
+         * runs in m/s on the comma's own bounds (offset_document.py
+         * IMPERIAL_BOUNDS — the bands Galaxy labels 0–25, 26–34,
+         * 35–43, 44–53, 54–63, 64–74, 75–98 mph): the bounds fall
+         * between whole-mph limits, so unit-conversion rounding can
+         * never flip a band the way an on-the-limit mph threshold
+         * would. Above the top bound the device applies its
+         * zero-offset band.
+         */
+        private fun bandOffsetMs(limitMs: Double, offsetAt: (Int) -> Double): Double = when {
+            limitMs < 11.2 -> offsetAt(0)
+            limitMs < 15.2 -> offsetAt(1)
+            limitMs < 19.6 -> offsetAt(2)
+            limitMs < 24.1 -> offsetAt(3)
+            limitMs < 28.6 -> offsetAt(4)
+            limitMs < 33.1 -> offsetAt(5)
+            limitMs < 44.2 -> offsetAt(6)
+            else -> 0.0
         }
 
         /**
@@ -240,16 +250,8 @@ data class TelemetryPacket(
             }
             if (effectiveLimitMs > 0.0) lastKnownLimitMs = effectiveLimitMs
             val limitMph = effectiveLimitMs * Units.MS_TO_MPH
-            val offsetMph = when {
-                limitMph < 1.0 -> 0.0
-                limitMph < 25 -> root.optDouble("Offset1", 0.0)
-                limitMph < 35 -> root.optDouble("Offset2", 0.0)
-                limitMph < 45 -> root.optDouble("Offset3", 0.0)
-                limitMph < 55 -> root.optDouble("Offset4", 0.0)
-                limitMph < 65 -> root.optDouble("Offset5", 0.0)
-                limitMph < 75 -> root.optDouble("Offset6", 0.0)
-                else -> root.optDouble("Offset7", 0.0)
-            }
+            val offsetMph = if (limitMph < 1.0) 0.0 else
+                bandOffsetMs(effectiveLimitMs) { band -> root.optDouble("Offset${band + 1}", 0.0) }
             val gps: GpsPosition? = when (val raw = root.opt("LastGPSPosition")) {
                 is JSONObject -> parseGps(raw)
                 is String -> if (raw.isBlank()) null else try {
@@ -422,7 +424,7 @@ data class TelemetryPacket(
 
             val limitMph = parsedLimitMs * Units.MS_TO_MPH
             val offsetMph = if (limitMph >= 1.0 && slcOffsetsMph != null) {
-                bandOffsetMph(limitMph) { band -> slcOffsetsMph.getOrElse(band) { 0.0 } }
+                bandOffsetMs(parsedLimitMs) { band -> slcOffsetsMph.getOrElse(band) { 0.0 } }
             } else 0.0
 
             return TelemetryPacket(

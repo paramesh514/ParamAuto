@@ -5730,17 +5730,15 @@ class SettingsDialogs(private val activity: Activity) {
             if (isParked) "Tap a speed band to adjust offset" else "Shift into Park to modify"
         )
 
+        // The comma's own band labels (Galaxy's slc page, current
+        // Dom): inclusive whole-number ranges. No road-type subtitles
+        // — the device has none; every row is a speed limit offset.
         val bands = listOf(
-            "0–24 mph" to "Residential",
-            "25–34 mph" to "Urban arterial",
-            "35–44 mph" to "Suburban boulevard",
-            "45–54 mph" to "Expressway",
-            "55–64 mph" to "State route",
-            "65–74 mph" to "Interstate highway",
-            "75+ mph" to "Rural interstate"
+            "0–25 mph", "26–34 mph", "35–43 mph", "44–53 mph",
+            "54–63 mph", "64–74 mph", "75–98 mph"
         )
         val card = createGroupCard(pal)
-        bands.forEachIndexed { idx, (range, roadType) ->
+        bands.forEachIndexed { idx, range ->
             if (idx > 0) card.addView(createDivider(pal))
             val cur = currentOffsets.getOrElse(idx) { 0.0 }.roundToInt()
             val sign = if (cur >= 0) "+$cur mph" else "$cur mph"
@@ -5748,7 +5746,7 @@ class SettingsDialogs(private val activity: Activity) {
                 createSettingsRow(
                     iconKind = SettingsIconView.Kind.SPEED,
                     title = range,
-                    subtitle = roadType,
+                    subtitle = "Speed limit offset",
                     badgeText = sign,
                     badgeActive = true,
                     pal = pal
@@ -5758,7 +5756,7 @@ class SettingsDialogs(private val activity: Activity) {
                         return@createSettingsRow
                     }
                     dialog.dismiss()
-                    showBandAdjustmentDialog(repo, currentOffsets, idx, "$range ($roadType)", isParked, client)
+                    showBandAdjustmentDialog(repo, currentOffsets, idx, range, isParked, client)
                 }
             )
         }

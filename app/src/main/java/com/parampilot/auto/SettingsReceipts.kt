@@ -7,7 +7,7 @@ import org.json.JSONObject
  *
  * After a settings commit is confirmed by the comma, the page is re-read and
  * each written row produces one receipt line naming the row and the value the
- * device actually holds now, e.g. "SLC offset 25–34 mph → 3 (read back from
+ * device actually holds now, e.g. "SLC offset 26–34 mph → 3 (read back from
  * comma)". When the read-back disagrees with what was written, the receipt
  * says so plainly instead of claiming success.
  *
