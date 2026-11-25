@@ -1632,7 +1632,7 @@ class MainActivity : Activity() {
         if (!dest.hasCoordinates) return false
         DestinationQueue.save(this, dest)
         NavStateManager.queuedDestination = dest
-        NavStateManager.queuedOutOfSync = NavStateManager.commaFound
+        NavStateManager.queuedOutOfSync = DestinationQueue.sendWasAnswered(NavigationManager.lastSendCode)
         NavStateManager.notifyChanged()
         if (NavStateManager.queuedOutOfSync) refreshQueuedSyncNetwork()
         return true
@@ -1703,7 +1703,7 @@ class MainActivity : Activity() {
         if (id == null && query == null) return false
         DestinationQueue.saveCommaPlace(this, dest.name, dest.placeName, id, query)
         NavStateManager.queuedDestination = dest
-        NavStateManager.queuedOutOfSync = NavStateManager.commaFound
+        NavStateManager.queuedOutOfSync = DestinationQueue.sendWasAnswered(NavigationManager.lastSendCode)
         NavStateManager.notifyChanged()
         if (NavStateManager.queuedOutOfSync) refreshQueuedSyncNetwork()
         return true

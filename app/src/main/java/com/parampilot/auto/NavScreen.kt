@@ -861,7 +861,7 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
                     CarToast.makeText(carContext, "Navigating to ${dest.name}", CarToast.LENGTH_SHORT).show()
                 } else {
                     PhoneGpsFeeder.stop()
-                    val outOfSync = NavStateManager.commaFound
+                    val outOfSync = DestinationQueue.sendWasAnswered(NavigationManager.lastSendCode)
                     DestinationQueue.save(carContext, dest)
                     NavStateManager.queuedDestination = dest
                     NavStateManager.queuedOutOfSync = outOfSync
@@ -1031,7 +1031,7 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
                     // offline, or connected but not accepted (out of
                     // sync). The flush retries every 15 s while the
                     // comma is connected.
-                    val outOfSync = NavStateManager.commaFound
+                    val outOfSync = DestinationQueue.sendWasAnswered(NavigationManager.lastSendCode)
                     val queued = dest.hasCoordinates && run {
                         DestinationQueue.save(carContext, dest)
                         NavStateManager.queuedDestination = dest
