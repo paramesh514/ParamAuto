@@ -2983,8 +2983,8 @@ class MainActivity : Activity() {
         intent.data = null
         intent.action = null
         setIntent(intent)
-        val target = if (data.scheme == "geo") {
-            SharedTextParser.parseGeoUri(data.toString())
+        val target = if (data.scheme == "geo" || data.scheme == "google.navigation") {
+            SharedTextParser.parseNavigationUri(data.toString())
         } else {
             SharedTextParser.parse(data.toString())
         }

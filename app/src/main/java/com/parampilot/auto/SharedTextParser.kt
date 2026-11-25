@@ -164,6 +164,32 @@ object SharedTextParser {
      * search form geo:0,0?q=<query>. A q that itself holds
      * coordinates wins as the destination.
      */
+    /**
+     * Navigation-intent URIs (NF-6): the URI forms other apps and
+     * the Assistant use to hand an app a destination. geo: goes
+     * through [parseGeoUri]; google.navigation: carries its
+     * destination in the q= parameter — "lat,lng" or a place
+     * query — which [parse] then reads as coordinates or a query.
+     * Anything else is read as shared text.
+     */
+    fun parseNavigationUri(uri: String?): SharedTarget {
+        val raw = uri?.trim().orEmpty()
+        if (raw.isEmpty()) return SharedTarget.Unreadable
+        if (raw.startsWith("geo:", ignoreCase = true)) return parseGeoUri(raw)
+        if (raw.startsWith("google.navigation:", ignoreCase = true)) {
+            val params = raw.substringAfter(':').split('&')
+                .mapNotNull { part ->
+                    val eq = part.indexOf('=')
+                    if (eq <= 0) null
+                    else part.substring(0, eq) to decode(part.substring(eq + 1))
+                }
+                .toMap()
+            val q = params["q"]?.trim().orEmpty()
+            return if (q.isEmpty()) SharedTarget.Unreadable else parse(q)
+        }
+        return parse(raw)
+    }
+
     fun parseGeoUri(uri: String?): SharedTarget {
         var raw = uri?.trim().orEmpty()
         if (!raw.startsWith("geo:", ignoreCase = true)) return SharedTarget.Unreadable

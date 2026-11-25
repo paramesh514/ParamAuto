@@ -29,6 +29,24 @@ object CarScreenNotice {
         "Phone has no internet — using the comma for search and routing"
 
     /**
+     * The car text ceiling (Car App Quality / car writing
+     * principles, from NHTSA/JAMA guidance): one chunk of text on
+     * a car screen stays within 120 characters.
+     */
+    const val CAR_TEXT_LIMIT = 120
+
+    /**
+     * Caps one car-displayed text at [CAR_TEXT_LIMIT], cutting
+     * with an ellipsis. Only the car copy is capped — the phone
+     * shows the same words in full (a queued destination's label
+     * carries the place name plus the comma's Wi-Fi detail and
+     * can run long).
+     */
+    fun capForCar(text: String): String =
+        if (text.length <= CAR_TEXT_LIMIT) text
+        else text.take(CAR_TEXT_LIMIT - 1).trimEnd() + "…"
+
+    /**
      * The persistent card for the main car nav screen, or null when
      * nothing is wrong. An active route owns the slot (RoutingInfo)
      * and never gets a notice; a queued destination outranks the
@@ -41,16 +59,19 @@ object CarScreenNotice {
         networks: GalaxyNetworks?,
         hasActiveRoute: Boolean,
         scenario: ConnectivityMatrix.Scenario
-    ): String? = when {
-        hasActiveRoute -> null
-        queued != null -> DestinationQueue.label(queued, outOfSync, networks)
-        scenario == ConnectivityMatrix.Scenario.NO_INTERNET ->
-            NO_INTERNET_CONNECTIVITY
-        scenario == ConnectivityMatrix.Scenario.COMMA_OUT_OF_SYNC ->
-            COMMA_OUT_OF_SYNC_NOTICE
-        scenario == ConnectivityMatrix.Scenario.COMMA_ONLY ->
-            COMMA_ONLY_NOTICE
-        else -> null
+    ): String? {
+        val text = when {
+            hasActiveRoute -> null
+            queued != null -> DestinationQueue.label(queued, outOfSync, networks)
+            scenario == ConnectivityMatrix.Scenario.NO_INTERNET ->
+                NO_INTERNET_CONNECTIVITY
+            scenario == ConnectivityMatrix.Scenario.COMMA_OUT_OF_SYNC ->
+                COMMA_OUT_OF_SYNC_NOTICE
+            scenario == ConnectivityMatrix.Scenario.COMMA_ONLY ->
+                COMMA_ONLY_NOTICE
+            else -> null
+        }
+        return text?.let { capForCar(it) }
     }
 
     /**
@@ -62,9 +83,11 @@ object CarScreenNotice {
         query: String,
         phoneHasInternet: Boolean,
         commaError: String?
-    ): String = when {
-        !phoneHasInternet -> NO_INTERNET_SEARCH
-        commaError != null -> "Comma search failed — $commaError"
-        else -> "No results found for \"$query\""
-    }
+    ): String = capForCar(
+        when {
+            !phoneHasInternet -> NO_INTERNET_SEARCH
+            commaError != null -> "Comma search failed — $commaError"
+            else -> "No results found for \"$query\""
+        }
+    )
 }

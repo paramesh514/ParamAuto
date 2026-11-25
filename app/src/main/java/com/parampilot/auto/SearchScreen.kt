@@ -394,7 +394,9 @@ class SearchScreen(
                     if (queued) {
                         CarToast.makeText(
                             carContext,
-                            DestinationQueue.label(resolved, outOfSync, NavStateManager.commaNetworks),
+                            CarScreenNotice.capForCar(
+                                DestinationQueue.label(resolved, outOfSync, NavStateManager.commaNetworks)
+                            ),
                             CarToast.LENGTH_LONG
                         ).show()
                         try { screenManager.pop() } catch (e: Exception) { android.util.Log.w("ParamAuto", "Ignored failure: ${e.javaClass.simpleName}: ${e.message}") }
@@ -443,7 +445,7 @@ class SearchScreen(
         if (queuedDest != null && searchQuery.isEmpty()) {
             listBuilder.addItem(
                 Row.Builder()
-                    .setTitle(DestinationQueue.label(queuedDest, NavStateManager.queuedOutOfSync, NavStateManager.commaNetworks))
+                    .setTitle(CarScreenNotice.capForCar(DestinationQueue.label(queuedDest, NavStateManager.queuedOutOfSync, NavStateManager.commaNetworks)))
                     .addText("Tap to cancel")
                     .setOnClickListener {
                         DestinationQueue.clear(carContext)

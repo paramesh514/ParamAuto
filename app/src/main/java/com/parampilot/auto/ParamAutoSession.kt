@@ -16,6 +16,7 @@ import androidx.lifecycle.LifecycleOwner
 /** One session per car connection. Attaches to the shared singleton CommaClient for the session lifetime. */
 class ParamAutoSession : Session() {
     private var client: CommaClient? = null
+    private var navScreen: NavScreen? = null
     private var locationManager: LocationManager? = null
 
     private val feederListener = LocationListener { loc -> PhoneGpsFeeder.onLocation(loc) }
@@ -26,6 +27,7 @@ class ParamAutoSession : Session() {
                 stopFeederLocation()
                 client?.detach()
                 client = null
+                navScreen = null
             }
         })
     }
@@ -38,7 +40,24 @@ class ParamAutoSession : Session() {
             BleBridgeClient.startIfPaired(carContext)
         }
         startFeederLocation()
-        return NavScreen(carContext, c)
+        val screen = NavScreen(carContext, c)
+        navScreen = screen
+        // NF-6: a session can be created BY a navigation request
+        // (Assistant / another app) — the intent carries it.
+        screen.handleNavigationIntent(intent)
+        return screen
+    }
+
+    /**
+     * NF-6: navigation requests that arrive while the session is
+     * already running (the Assistant's "navigate to …" while
+     * ParamAuto is the default navigation app) are handed to the
+     * nav screen, which sends a coordinate destination on or
+     * opens the search already run for a place query.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        navScreen?.handleNavigationIntent(intent)
     }
 
     /**
