@@ -11,8 +11,8 @@ import kotlin.math.abs
  * [labeledRows] (from SgGalaxyClient.fetchSlcOffsetRows): Dom's
  * SlcOffsetOwner derives the band bounds from its stored document, so
  * the app never hardcodes ranges for display. [rows] keeps the older
- * value-only form with the app's nominal band labels for callers that
- * only hold a parsed curve.
+ * value-only form with the device's own band labels ([BAND_RANGES])
+ * for callers that only hold a parsed curve.
  *
  * A null (or short) read renders the single honest line "Offsets not
  * reported by the comma", never an invented table — that is still the
@@ -21,7 +21,7 @@ import kotlin.math.abs
 object OffsetsGlance {
 
     val BAND_RANGES: List<String> =
-        listOf("0–25", "25–35", "35–45", "45–55", "55–65", "65–75", "75+")
+        listOf("0–25", "26–34", "35–43", "44–53", "54–63", "64–74", "75–98")
 
     const val NOT_REPORTED_LINE = "Offsets not reported by the comma"
 
