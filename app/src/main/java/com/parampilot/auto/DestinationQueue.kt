@@ -197,11 +197,23 @@ object DestinationQueue {
     }
 
     /**
+     * Whether the last destination send was ANSWERED by the comma —
+     * an HTTP response came back (any positive status), as opposed
+     * to never arriving (transport failure, no connection, or no
+     * send attempted). Addendum 146 (Param, 2026-11-25): the queue
+     * wording must say "comma not connected" when the comma is not
+     * connected — "out of sync" is only for a comma that answered
+     * but did not accept.
+     */
+    fun sendWasAnswered(lastSendCode: Int?): Boolean =
+        lastSendCode != null && lastSendCode > 0
+
+    /**
      * The ONE queued-indicator text (Addendum 122), shared by the top
      * bar chip and the nav banner row so both surfaces say the same
-     * thing: queued-offline vs out-of-sync (comma reached but the
-     * destination not accepted — connect the comma to the Internet
-     * so it gets navigation details).
+     * thing: comma-not-connected vs out-of-sync (comma answered but
+     * the destination not accepted — connect the comma to the
+     * Internet so it gets navigation details).
      */
     fun label(
         dest: NavDestination,
@@ -220,7 +232,7 @@ object DestinationQueue {
             }
             "Out of sync: ${dest.name} not accepted — ${wifiDetail}connect the comma to the Internet"
         } else {
-            "Queued: ${dest.name} — will send when the comma connects"
+            "Comma not connected: ${dest.name} — will send when the comma connects"
         }
 
     /** Lowercase, punctuation-collapsed form for name matching. */

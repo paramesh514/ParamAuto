@@ -372,7 +372,7 @@ class SearchScreen(
                     // offline, or connected but not accepted (out of
                     // sync). The flush retries every 15 s while the
                     // comma is connected.
-                    val outOfSync = NavStateManager.commaFound
+                    val outOfSync = DestinationQueue.sendWasAnswered(NavigationManager.lastSendCode)
                     var queued = false
                     if (resolved.hasCoordinates) {
                         DestinationQueue.save(carContext, resolved)

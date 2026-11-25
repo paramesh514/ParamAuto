@@ -994,6 +994,7 @@ class NavigationManager {
             }
 
             val code = conn.responseCode
+            lastSendCode = code
             val ok = code == 200
             if (ok) {
                 lastSendError = null
@@ -1009,6 +1010,7 @@ class NavigationManager {
             ok
         } catch (e: Exception) {
             lastSendError = e.message ?: e.javaClass.simpleName
+            lastSendCode = -1
             Log.e(TAG, "Error sending destination to $target: ${e.message}")
             false
         } finally {
@@ -1121,6 +1123,7 @@ class NavigationManager {
                 put("revision", rev)
             }
         }
+        lastSendCode = code
         if (code != 200) {
             lastSendError = if (code == 401) {
                 "comma refused the request (HTTP 401) — Galaxy sign-in/password needed for this connection"
@@ -1303,6 +1306,7 @@ class NavigationManager {
         if (placeId.isNullOrEmpty() || searchId.isNullOrEmpty()) {
             lastSendError = "Search again before choosing this place"
             lastCommaSearchError = lastSendError
+            lastSendCode = null
             return false
         }
         // Present the search-time revision (see the KDoc on
@@ -1317,6 +1321,7 @@ class NavigationManager {
                 put("revision", rev)
             }
         }
+        lastSendCode = code
         if (code != 200) {
             val error = resp?.optString("error", "")?.ifEmpty { null }
             lastSendError = error ?: if (code == 401) {
@@ -1885,6 +1890,15 @@ class NavigationManager {
         /** Why the most recent comma send failed (HTTP code or exception); null after a success. */
         @Volatile
         var lastSendError: String? = null
+            private set
+
+        /** The most recent send's raw outcome code (Addendum 146):
+         *  a positive HTTP status when the comma ANSWERED, -1 on a
+         *  transport failure (nothing answered), null when no send
+         *  has run or it failed before any request. The queue
+         *  wording keys off this — see DestinationQueue.sendWasAnswered. */
+        @Volatile
+        var lastSendCode: Int? = null
             private set
 
         /** Records a send-path failure that happened before any send was attempted (e.g. an unresolvable selection), so the UI can surface the real reason. */

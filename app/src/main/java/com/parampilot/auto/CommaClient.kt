@@ -1547,16 +1547,17 @@ class CommaClient(private val context: Context) {
                     notifyDiagnostic("Queued destination sent to comma: ${queued.name}")
                 } else {
                     DestinationQueue.noteFlushFailure()
-                    // The comma answered but still did not accept the
-                    // destination: phone and comma are out of sync
-                    // (Addendum 122) — the queued indicator switches to
-                    // the connect-the-comma-to-the-Internet message.
-                    // Refresh the comma's network snapshot so the
-                    // message can name the Wi-Fi it is on (Param,
-                    // 2026-11-21), then notify either way: the Wi-Fi
-                    // detail may have changed even when the sync flag
-                    // did not.
-                    NavStateManager.queuedOutOfSync = true
+                    // Out of sync only when the comma ANSWERED but
+                    // still did not accept the destination (Addendum
+                    // 122); a send that never arrived means the comma
+                    // is not connected, and the indicator must say so
+                    // (Addendum 146, Param 2026-11-25). Refresh the
+                    // comma's network snapshot so the message can name
+                    // the Wi-Fi it is on (Param, 2026-11-21), then
+                    // notify either way: the Wi-Fi detail may have
+                    // changed even when the sync flag did not.
+                    NavStateManager.queuedOutOfSync =
+                        DestinationQueue.sendWasAnswered(NavigationManager.lastSendCode)
                     try {
                         NavigationManager().fetchNetworksSg(baseUrl)
                     } catch (e: Exception) {
