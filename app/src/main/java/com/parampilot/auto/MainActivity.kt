@@ -480,6 +480,14 @@ class MainActivity : Activity() {
             // including when the comma's own GPS makes the rest of this
             // listener a no-op below. It self-gates on isFeeding.
             PhoneGpsFeeder.onLocation(loc)
+            // Phone-side guidance (Addendum 145): while a destination
+            // is queued the comma is not navigating, so the phone
+            // guides from its own fixes. This is the standalone
+            // map-app mode — nothing is sent to the comma — so it
+            // runs before the Cloud gate and the Phone Data toggles
+            // below, which govern phone data used alongside a comma
+            // session.
+            maybeRunPhoneGuidance(loc)
             // Cloud gate (Param, 2026-11-12): on Galaxy Cloud the
             // phone's location and speed are not used at all.
             if (!HeartbeatTransport.phoneDataAllowed(NavStateManager.activeTransport)) return
@@ -1121,6 +1129,62 @@ class MainActivity : Activity() {
             // Navigation has ended on Comma (destination reached, canceled, or cleared)
             clearNavigation(notifySharedState = true, sendClearToComma = false)
         }
+    }
+
+    /**
+     * Phone-side guidance driver (Addendum 145): on each phone fix,
+     * while the active destination is queued and the comma is not
+     * itself guiding, derive the maneuver from the route and render
+     * it — turn banner, ETA bar, map follow — exactly like comma
+     * guidance. Runs on the location thread; UI work is posted.
+     */
+    private fun maybeRunPhoneGuidance(loc: Location) {
+        val dest = activeDestination ?: return
+        val queued = NavStateManager.queuedDestination?.isSameAs(dest) == true
+        val commaGuiding = PhoneGuidance.commaIsGuiding(
+            NavStateManager.lastPacketReceivedAtMs,
+            NavStateManager.latestPacket?.nav?.valid == true,
+            System.currentTimeMillis()
+        )
+        if (!PhoneGuidance.shouldGuide(queued, hasDestination = true, commaGuiding = commaGuiding)) return
+        if (loc.hasAccuracy() && loc.accuracy > 100f) return
+        val gps = GpsPosition(
+            latitude = loc.latitude,
+            longitude = loc.longitude,
+            bearing = if (loc.hasBearing()) loc.bearing.toDouble() else (currentGps?.bearing ?: 0.0),
+            speed = if (loc.hasSpeed()) loc.speed.toDouble() else 0.0,
+            hasFix = true
+        )
+        currentGps = gps
+        // State mirror for the car screen and the shared ETA math;
+        // updateGps itself ignores the phone fix when the comma is
+        // providing one.
+        NavStateManager.updateGps(gps)
+        val maneuver = NavStateManager.phoneManeuver(gps)
+        if (maneuver.valid && maneuver.street.isNotEmpty()) {
+            NavStateManager.activeTurnCue =
+                if (maneuver.type.isNotEmpty()) "${maneuver.type} on ${maneuver.street}" else maneuver.street
+        }
+        runOnUiThread {
+            // The destination may have been accepted or cancelled
+            // while this fix was in flight; re-check before drawing.
+            if (activeDestination?.isSameAs(dest) != true) return@runOnUiThread
+            if (!isRoutesOverviewActive) updateMapPosition(gps, animate = true)
+            if (maneuver.valid) turnBanner.update(maneuver, dest)
+            updateTripInfo(dest, null)
+            if (PhoneGuidance.isArrival(maneuver)) onPhoneGuidanceArrived(dest)
+        }
+    }
+
+    /** Phone guidance reached the destination: the queued send is
+     *  moot, so clear the queue and end the local navigation the
+     *  same way a comma-ended route ends — nothing to clear on the
+     *  comma, it never accepted the destination. */
+    private fun onPhoneGuidanceArrived(dest: NavDestination) {
+        DestinationQueue.clear(this)
+        NavStateManager.queuedDestination = null
+        NavStateManager.queuedOutOfSync = false
+        clearNavigation(notifySharedState = true, sendClearToComma = false)
     }
 
     private fun updateTripInfo(dest: NavDestination?, pkt: TelemetryPacket?) {

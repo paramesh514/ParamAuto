@@ -1044,8 +1044,37 @@ object NavStateManager {
             return pNav
         }
 
-        // 2. No live instruction: derive the upcoming maneuver from
-        // the route steps ahead of the vehicle.
+        // 2 + 3. No live instruction: derive from the route itself.
+        return deriveFromRoute(dest, chosenRoute, car)
+    }
+
+    /**
+     * Phone-side guidance (Addendum 145): the maneuver derived from
+     * the route itself for an explicit car position — never the
+     * comma's live instruction. Used while a destination is queued
+     * (the comma has not accepted it), when the phone is the only
+     * navigator: MainActivity feeds it phone GPS fixes and renders
+     * the result exactly like a comma maneuver.
+     */
+    fun phoneManeuver(car: GpsPosition): NavManeuver {
+        if (navClearedByUser && activeDestination == null) {
+            return NavManeuver(valid = false)
+        }
+        val dest = activeDestination ?: return NavManeuver(valid = false)
+        val chosenRoute = selectedRoute ?: activeRoutes.firstOrNull()
+        return deriveFromRoute(dest, chosenRoute, car)
+    }
+
+    /** Branches 2–3 of [getEffectiveManeuver], shared with
+     *  [phoneManeuver]: next turn from the route steps, else the
+     *  straight/arrive fallback toward the destination. */
+    private fun deriveFromRoute(
+        dest: NavDestination?,
+        chosenRoute: RouteOption?,
+        car: GpsPosition?
+    ): NavManeuver {
+        // 2. Derive the upcoming maneuver from the route steps ahead
+        // of the vehicle.
         deriveNextTurnFromSteps(dest, chosenRoute, car)?.let { return it }
 
         // 3. Fallback if destination is active
