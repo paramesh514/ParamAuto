@@ -71,6 +71,15 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="geo" />
             </intent-filter>
+            <!-- Navigation intents (NF-6): "navigate to …" requests
+                 from the Assistant and other apps arrive as
+                 google.navigation: URIs. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="google.navigation" />
+            </intent-filter>
             <!-- Accept a place or trip link (2026-11-18): Google Maps
                  place/directions links open in ParamAuto. -->
             <intent-filter>

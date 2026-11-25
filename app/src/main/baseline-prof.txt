@@ -1,0 +1,14 @@
+# ParamAuto baseline profile — the two startup journeys (phone
+# launch and Android Auto session start) AOT-compiled at install
+# time, per the Android app-optimization guidance. Keep to entry
+# classes and their onCreate paths; regenerate when the startup
+# journey changes.
+Lcom/parampilot/auto/ParamAuto;
+Lcom/parampilot/auto/MainActivity;
+HSPLcom/parampilot/auto/MainActivity;->onCreate(Landroid/os/Bundle;)V
+Lcom/parampilot/auto/ParamAutoCarAppService;
+HSPLcom/parampilot/auto/ParamAutoCarAppService;->onCreate()V
+Lcom/parampilot/auto/ParamAutoSession;
+Lcom/parampilot/auto/NavScreen;
+Lcom/parampilot/auto/CommaClient;
+Lcom/parampilot/auto/NavStateManager;

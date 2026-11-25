@@ -126,6 +126,19 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
                 stopNavigationFromHost()
             }
         }
+
+        override fun onAutoDriveEnabled() {
+            // NF-7 test drive (Car App Quality): the host (DHU
+            // AUTO_DRIVE, Play reviewers) asks the app to simulate
+            // drives to chosen destinations. The mode has no
+            // disable callback — it stays for the session; the
+            // simulation starts when a destination is chosen, or
+            // immediately when one is already active.
+            mainHandler.post {
+                autoDriveEnabled = true
+                maybeStartAutoDriveSimulation()
+            }
+        }
     }
 
     private val navListener: () -> Unit = {
@@ -157,6 +170,12 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
                     Log.w("NavScreen", "Car NavigationManager state sync failed: ${e.message}")
                 }
             }
+        }
+
+        // NF-7: in test-drive mode, a destination becoming active
+        // starts its simulated drive.
+        if (autoDriveEnabled && hasNav && !SimulationEngine.isSimulating) {
+            mainHandler.post { maybeStartAutoDriveSimulation() }
         }
 
         val currentCue = NavStateManager.activeTurnCue
@@ -375,6 +394,11 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
         }
         startLocationUpdates()
         mainHandler.post(freshnessTicker)
+        screenReady = true
+        pendingExternalQuery?.let { query ->
+            pendingExternalQuery = null
+            pushSearchForQuery(query)
+        }
     }
 
     private fun startLocationUpdates() {
@@ -481,6 +505,11 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
     private val renderExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
 
     override fun onDestroy(owner: LifecycleOwner) {
+        // A test-drive simulation belongs to this session's screen;
+        // it does not outlive it.
+        if (autoDriveEnabled && SimulationEngine.isSimulating) {
+            SimulationEngine.stop()
+        }
         try {
             val carNavManager = carContext.getCarService(androidx.car.app.navigation.NavigationManager::class.java)
             carNavManager.clearNavigationManagerCallback()
@@ -673,6 +702,23 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
     private var hostStopped = false
 
     /**
+     * NF-7 test-drive mode (Car App Quality): true once the host
+     * enables auto drive for this session. While set, a chosen
+     * destination is driven by [SimulationEngine] — the same
+     * engine the phone's demo trips use — instead of waiting on
+     * the comma. The callback has no disable counterpart; the
+     * mode lasts for the session and the simulation stops with
+     * this screen.
+     */
+    private var autoDriveEnabled = false
+
+    /** An external place query waiting for this screen to be ready to push its search screen (NF-6). */
+    private var pendingExternalQuery: String? = null
+
+    /** True once this screen's lifecycle onCreate has run (the screen is attached and can push). */
+    private var screenReady = false
+
+    /**
      * Host-initiated stop (Param's fix, 2026-11-06): Android Auto
      * gives turn-by-turn to ONE app — when Google Maps starts
      * navigating, the host orders us to stop. That order used to
@@ -698,6 +744,138 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
         }
         drawMapOnSurface()
         try { invalidate() } catch (e: Exception) { android.util.Log.w("ParamAuto", "Ignored failure: ${e.javaClass.simpleName}: ${e.message}") }
+    }
+
+    /**
+     * NF-7: starts the test-drive simulation toward the active
+     * destination, when auto drive is on and no simulation is
+     * already running. The selected route's points drive it when
+     * a route is on screen; otherwise the engine's default drive.
+     */
+    private fun maybeStartAutoDriveSimulation() {
+        if (!autoDriveEnabled || SimulationEngine.isSimulating) return
+        val dest = NavStateManager.activeDestination ?: return
+        SimulationEngine.start(NavStateManager.selectedRoute?.points, dest)
+    }
+
+    /**
+     * NF-6 (Car App Quality): navigation requests from other apps
+     * and the Assistant reach the car session as intents, handed
+     * here by the session. A coordinate destination is sent on
+     * through the same send + queue path a search selection uses;
+     * a place query opens the search screen with the search
+     * already run — the treatment the phone gives an external
+     * query. Links stay the phone's to resolve; the car never
+     * expands them.
+     */
+    fun handleNavigationIntent(intent: android.content.Intent?) {
+        if (intent == null) return
+        val target = when {
+            intent.dataString != null ->
+                SharedTextParser.parseNavigationUri(intent.dataString)
+            intent.getStringExtra(android.content.Intent.EXTRA_TEXT) != null ->
+                SharedTextParser.parse(intent.getStringExtra(android.content.Intent.EXTRA_TEXT))
+            else -> SharedTarget.Unreadable
+        }
+        when (target) {
+            is SharedTarget.Coords -> sendExternalDestination(
+                NavDestination(
+                    name = target.label ?: "Shared location",
+                    placeName = target.label ?: "",
+                    latitude = target.latitude,
+                    longitude = target.longitude,
+                    source = "assistant"
+                )
+            )
+            is SharedTarget.Query ->
+                if (screenReady) pushSearchForQuery(target.text)
+                else pendingExternalQuery = target.text
+            else -> Unit
+        }
+    }
+
+    /** Opens the car search with [query] already submitted. */
+    private fun pushSearchForQuery(query: String) {
+        val screen = SearchScreen(carContext, client)
+        try {
+            screenManager.push(screen)
+            screen.onSearchSubmitted(query)
+        } catch (e: Exception) {
+            Log.w("NavScreen", "Failed to open search for external query: ${e.message}")
+        }
+    }
+
+    /**
+     * Sends an externally supplied coordinate destination (NF-6)
+     * with the same bookkeeping as a search selection: the queued
+     * destination exclusivity rule, the send itself, history,
+     * the phone-GPS feeder session, and queue-on-failure.
+     */
+    private fun sendExternalDestination(dest: NavDestination) {
+        val queuedNow = NavStateManager.queuedDestination
+            ?: DestinationQueue.loadEntry(carContext)?.displayDestination()
+        if (queuedNow != null && !queuedNow.name.equals(dest.name, ignoreCase = true)) {
+            CarToast.makeText(
+                carContext,
+                "A destination is already queued — it must be sent or cancelled before choosing another",
+                CarToast.LENGTH_LONG
+            ).show()
+            return
+        }
+        NavStateManager.markDestinationSelected(dest)
+        val feederTarget = client.getEffectiveNavigationEndpoint()
+        if (NavStateManager.usePhoneLocationToComma && !feederTarget.isNullOrBlank()) {
+            PhoneGpsFeeder.start(feederTarget)
+        }
+        Thread {
+            val target = client.getEffectiveNavigationEndpoint()
+            val ok = if (NavStateManager.isSgGalaxy) {
+                NavigationManager().sendToCommaSg(
+                    SgGalaxyClient.baseUrlFor(target), dest, NavStateManager.sgRevision
+                )
+            } else {
+                NavigationManager().sendToComma(target, dest, client.getGalaxyCookie())
+            }
+            mainHandler.post {
+                if (ok) {
+                    if (!target.isNullOrBlank()) {
+                        PhoneGpsFeeder.startNavigationSession(target)
+                    }
+                    if (NavStateManager.queuedDestination?.isSameAs(dest) == true) {
+                        DestinationQueue.clear(carContext)
+                        NavStateManager.queuedDestination = null
+                        NavStateManager.queuedOutOfSync = false
+                    }
+                    DestinationHistory.record(carContext, dest)
+                    NavStateManager.activeDestination = dest
+                    NavStateManager.setNavClearedByUser(false)
+                    NavStateManager.activeTurnCue = "Head toward ${dest.name}"
+                    NavStateManager.notifyChanged()
+                    NavigationManager.startNavigationRefresh { client.getEffectiveNavigationEndpoint() }
+                    try {
+                        val carNavManager = carContext.getCarService(androidx.car.app.navigation.NavigationManager::class.java)
+                        carNavManager.navigationStarted()
+                    } catch (e: Exception) {
+                        Log.w("NavScreen", "Failed to start car navigation: ${e.message}")
+                    }
+                    CarToast.makeText(carContext, "Navigating to ${dest.name}", CarToast.LENGTH_SHORT).show()
+                } else {
+                    PhoneGpsFeeder.stop()
+                    val outOfSync = NavStateManager.commaFound
+                    DestinationQueue.save(carContext, dest)
+                    NavStateManager.queuedDestination = dest
+                    NavStateManager.queuedOutOfSync = outOfSync
+                    NavStateManager.notifyChanged()
+                    CarToast.makeText(
+                        carContext,
+                        CarScreenNotice.capForCar(
+                            DestinationQueue.label(dest, outOfSync, NavStateManager.commaNetworks)
+                        ),
+                        CarToast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }.start()
     }
 
     private fun stopNavigation() {
@@ -1078,8 +1256,12 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
 
         val actionStrip = actionStripBuilder.build()
 
-        // Push active trip guidance to Android Auto's native navigation HUD and instrument cluster
-        if (dest != null) {
+        // Push active trip guidance to Android Auto's native navigation HUD and instrument cluster.
+        // While the host has parked our claim (NF-5: another app is
+        // guiding), trip updates stop too — the callback contract
+        // requires it, and this screen's own invalidate() on host
+        // stop must not re-push the trip it just ended.
+        if (dest != null && !hostStopped) {
             pushTripToCarNavManager(dest, targetRoad, estimate, distance, step, guidance.stepDurationSeconds)
         }
 
