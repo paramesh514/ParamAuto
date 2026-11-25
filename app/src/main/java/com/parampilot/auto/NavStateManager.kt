@@ -293,13 +293,25 @@ object NavStateManager {
     var commaNavProviders: GoogleNav.State? = null
 
     /**
-     * The comma's Galaxy Networks snapshot (Wi-Fi manager), last read
-     * by the Settings Wi-Fi page. Null until that page (or an action on
-     * it) hears from the comma — the endpoint only exists on StarPilot
-     * builds with the Networks page.
+     * The comma's Galaxy Networks snapshot (Wi-Fi manager), read by
+     * the Settings Wi-Fi page, refreshed by CommaClient's loop while
+     * connected (Addendum 143) and on queue-flush failures. Null
+     * until something hears from the comma — the endpoint only
+     * exists on StarPilot builds with the Networks page.
      */
     @Volatile
     var commaNetworks: GalaxyNetworks? = null
+
+    /**
+     * Whether the PHONE currently has validated internet
+     * (Addendum 143), maintained by CommaClient's network callback
+     * from Android's own capability verdict. Defaults to true:
+     * unknown reads as online, so no feature is ever gated on a
+     * guess. The phone half of the [ConnectivityMatrix] scenario;
+     * the comma half is [commaNetworks]' link.
+     */
+    @Volatile
+    var phoneInternet: Boolean = true
 
     /** The comma's own recent destinations from the latest snapshot (Feature 8). */
     @Volatile

@@ -1299,6 +1299,18 @@ class MainActivity : Activity() {
             topBar.showResults(starredMatches)
         }
 
+        // Connectivity matrix (Addendum 143): scenario 4 (both
+        // sides offline) disables network search outright — keep
+        // the local rows and say why. Scenario 2 forces the comma
+        // branch inside the search thread below.
+        val scenario = ConnectivityMatrix.current()
+        if (!ConnectivityMatrix.searchAllowed(scenario)) {
+            topBar.setSearchLoading(false)
+            topBar.showResults(ordered(starredMatches))
+            Toast.makeText(this, CarScreenNotice.NO_INTERNET_CONNECTIVITY, Toast.LENGTH_LONG).show()
+            return
+        }
+
         // 2. Network only on explicit submission cache miss. The
         // spinner stays up until these fresh results land, so the
         // interim rows above are not mistaken for the final answer
@@ -1308,7 +1320,9 @@ class MainActivity : Activity() {
             val token = client?.mapboxToken ?: NavStateManager.mapboxToken
             val start = currentGps ?: GpsPosition(33.4484, -112.0740)
             var source = "photon"
-            val places: List<NavDestination> = if (!NavStateManager.usePhoneSearch) {
+            val places: List<NavDestination> = if (
+                ConnectivityMatrix.useCommaSearch(scenario, NavStateManager.usePhoneSearch)
+            ) {
                 // Phone search OFF: skip Mapbox and Photon entirely and use
                 // only the comma's own search. No comma connected -> empty
                 // results (never fall back to phone sources).

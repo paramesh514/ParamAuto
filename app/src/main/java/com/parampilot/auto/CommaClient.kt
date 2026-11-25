@@ -8,6 +8,7 @@ import android.location.LocationListener
 import android.location.LocationManager
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -80,6 +81,9 @@ class CommaClient(private val context: Context) {
         }
     }
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    /** Last Galaxy Networks refresh for the connectivity matrix (Addendum 143). */
+    private var lastNetworksRefreshMs: Long = 0L
 
     fun attach(): CommaClient {
         synchronized(this) {
@@ -755,11 +759,37 @@ class CommaClient(private val context: Context) {
         }, "auto-failover-thread").start()
     }
 
+    /**
+     * Keeps [NavStateManager.phoneInternet] (Addendum 143) in step
+     * with Android's own verdict: the default network must carry
+     * INTERNET + VALIDATED. A null [caps] recomputes from the
+     * ConnectivityManager (network swaps report lost/available
+     * without capabilities). Notifies only on an actual flip.
+     */
+    private fun updatePhoneInternet(caps: NetworkCapabilities?) {
+        val online = if (caps != null) {
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        } else {
+            PhoneConnectivity.hasInternet(context)
+        }
+        if (NavStateManager.phoneInternet != online) {
+            NavStateManager.phoneInternet = online
+            NavStateManager.notifyChanged()
+        }
+    }
+
     private fun registerNetworkCallback() {
         try {
             val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+            NavStateManager.phoneInternet = PhoneConnectivity.hasInternet(context)
             val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                    updatePhoneInternet(caps)
+                }
+
                 override fun onLost(network: Network) {
+                    updatePhoneInternet(null)
                     if (getConnectionMode() == MODE_AUTO && NavStateManager.activeTransport == NavStateManager.TransportType.IP) {
                         Log.i(TAG, "Network lost on IP transport — triggering immediate failover")
                         triggerImmediateAutoFailover()
@@ -767,6 +797,7 @@ class CommaClient(private val context: Context) {
                 }
 
                 override fun onAvailable(network: Network) {
+                    updatePhoneInternet(null)
                     if (getConnectionMode() == MODE_AUTO && NavStateManager.activeTransport != NavStateManager.TransportType.IP) {
                         Log.i(TAG, "Network available — checking for Local comma")
                         Thread({
@@ -1837,6 +1868,29 @@ class CommaClient(private val context: Context) {
                 failures = 0
                 recoveryAttempts = 0
                 commaFound = true
+                // Addendum 143: keep the comma's network snapshot
+                // fresh for the connectivity matrix (its link is the
+                // comma half of the scenario) — one small GET every
+                // 30 s while connected, never while an update is
+                // pending (quiet mode is heartbeat-only).
+                if (sgMode && !NavStateManager.softwareUpdatePending &&
+                    System.currentTimeMillis() - lastNetworksRefreshMs >= 30_000L
+                ) {
+                    lastNetworksRefreshMs = System.currentTimeMillis()
+                    Thread {
+                        try {
+                            val linkBefore = NavStateManager.commaNetworks?.link
+                            NavigationManager().fetchNetworksSg(
+                                SgGalaxyClient.baseUrlFor(endpoint)
+                            )
+                            if (NavStateManager.commaNetworks?.link != linkBefore) {
+                                NavStateManager.notifyChanged()
+                            }
+                        } catch (e: Exception) {
+                            Log.d(TAG, "Networks refresh failed: ${e.message}")
+                        }
+                    }.start()
+                }
                 val phoneOk = HeartbeatTransport.phoneDataAllowed(NavStateManager.activeTransport)
                 val liveGps = pkt.gps ?: if (phoneOk) lastPhoneGps else null
                 val liveSpeed = if (pkt.speedMs > 0.0 || !phoneOk) pkt.speedMs else gpsSpeedMs
@@ -2631,6 +2685,10 @@ class CommaClient(private val context: Context) {
         // Cloud gate (Param, 2026-11-12): the phone speed limit is
         // neither fetched nor used while the transport is Cloud.
         if (!HeartbeatTransport.phoneDataAllowed(NavStateManager.activeTransport)) return
+        // Matrix gate (Addendum 143, scenarios 2 and 4): with no
+        // phone internet there are no phone data fetches — the
+        // comma's own limit (or none) is what shows.
+        if (!NavStateManager.phoneInternet) return
         val token = (mapboxToken ?: NavStateManager.mapboxToken)?.trim()?.takeIf { it.isNotBlank() }
         // Google Roads is the speed-limit source when the phone
         // Google key may be used (Param, 2026-11-18); Mapbox remains
@@ -2771,6 +2829,11 @@ class CommaClient(private val context: Context) {
         val wantSignals = NavStateManager.usePhoneSignals
         val wantStops = NavStateManager.usePhoneStops
         if (!wantSignals && !wantStops) return
+        // Matrix gate (Addendum 143, scenarios 2 and 4): signals and
+        // stops are phone-internet fetches — with no phone internet
+        // they are not attempted (already-shown markers for this
+        // route stay; they are fetched facts, not a live feed).
+        if (!NavStateManager.phoneInternet) return
         // Identity is the route GEOMETRY (fingerprint), not just
         // endpoints + point count: alternative routes share the
         // endpoints and often the count, and the old key then
