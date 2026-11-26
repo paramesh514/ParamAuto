@@ -72,7 +72,22 @@ object GalaxySettings {
 
     data class PageEntry(val id: String, val title: String, val blurb: String)
 
-    /** The pages Param asked for (2026-11-20), grouped for the list. */
+    /**
+     * The Galaxy settings pages in the menu, grouped for the list.
+     * The first two sections are the pages Param asked for
+     * (2026-11-20); Addendum 147 (2026-11-26, Galaxy-parity mandate)
+     * added every remaining top-level Galaxy page so nothing the
+     * portal offers is missing here. Page ids are the server's own
+     * PAGES registry (galaxy/settings.py, identical on the testing
+     * and stable branches) — [GALAXY_PAGES] pins the full set and a
+     * test keeps the two from drifting apart. Pages NOT in the menu:
+     * slc (the Speed limit assist sheet), the profiles/personalities
+     * family (the personality surfaces), hub (the portal home, not a
+     * settings page) and starport_options (StarPort management, its
+     * own parity item). Sub-pages (torque/developer,
+     * profiles/developer, tuning, per-sound editors) open through
+     * drill-in rows on their parent pages.
+     */
     val SECTIONS: List<Pair<String, List<PageEntry>>> = listOf(
         "DRIVING" to listOf(
             PageEntry("lane", "Lane", "Centering, strength & lane behavior"),
@@ -80,7 +95,9 @@ object GalaxySettings {
             PageEntry("curve", "Curve Speed", "Slowing for curves"),
             PageEntry("torque", "Torque", "Steering torque tuning"),
             PageEntry("torque/bluepilot", "Torque · BluePilot", "BluePilot torque style"),
-            PageEntry("aol", "Always-On Lateral", "Lateral control while disengaged")
+            PageEntry("aol", "Always-On Lateral", "Lateral control while disengaged"),
+            PageEntry("conditional", "Conditional", "Conditional driving modes & triggers"),
+            PageEntry("conditional/cem", "Conditional · CEM", "Conditional engagement modes")
         ),
         "CONTROLS & COMMA" to listOf(
             PageEntry("wheel", "Wheel Controls", "Steering-wheel button actions"),
@@ -90,8 +107,37 @@ object GalaxySettings {
             PageEntry("data", "Data", "Data & uploads"),
             PageEntry("localization", "Localization", "Language, units & formats"),
             PageEntry("vehicle", "Vehicle", "Vehicle selection & configuration")
+        ),
+        "DEVICE" to listOf(
+            PageEntry("sounds", "Sounds", "Alert sounds & sound packs"),
+            PageEntry("sentry", "Sentry", "Sentry mode & event recording"),
+            PageEntry("pip", "Picture-in-Picture", "Projection window & layout rows"),
+            PageEntry("vasm", "VASM", "On-screen annotation rows")
+        ),
+        "ADVANCED" to listOf(
+            PageEntry("developer", "Developer", "Developer & debugging options")
         )
     )
+
+    /**
+     * Every page id in the Galaxy server's PAGES registry
+     * (openpilot/starpilot/galaxy/settings.py), verified identical
+     * on the testing and stable branches on 2026-11-26. The
+     * completeness test classifies each id: in [SECTIONS], served by
+     * a dedicated surface, a drill-in sub-page, or not a settings
+     * page — so a future upstream page addition fails the suite
+     * until it is classified here.
+     */
+    val GALAXY_PAGES: Set<String> = setOf(
+        "hub", "developer", "localization", "starport_options", "vehicle",
+        "slc", "lane", "lane_change", "profiles", "profiles/developer",
+        "personalities", "traffic", "aggressive", "standard", "relaxed",
+        "curve", "torque", "torque/developer", "tuning", "torque/bluepilot",
+        "aol", "wheel", "appearance", "display", "data", "power", "sounds",
+        "pip", "sentry", "vasm", "conditional", "conditional/cem"
+    ) + setOf("traffic", "aggressive", "standard", "relaxed")
+        .flatMap { name -> listOf("acceleration", "braking", "following").map { "$name/$it" } }
+        .toSet()
 
     fun parsePage(json: JSONObject?): Page? {
         if (json == null) return null
