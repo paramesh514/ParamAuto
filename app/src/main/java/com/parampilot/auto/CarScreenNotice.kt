@@ -23,7 +23,7 @@ object CarScreenNotice {
         "No internet connection — search needs internet"
 
     const val COMMA_OUT_OF_SYNC_NOTICE =
-        "Comma out of sync — the comma has no internet connection"
+        "Comma has no Internet"
 
     const val COMMA_ONLY_NOTICE =
         "Phone has no internet — using the comma for search and routing"
