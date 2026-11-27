@@ -77,16 +77,22 @@ object GalaxySettings {
      * The first two sections are the pages Param asked for
      * (2026-11-20); Addendum 147 (2026-11-26, Galaxy-parity mandate)
      * added every remaining top-level Galaxy page so nothing the
-     * portal offers is missing here. Page ids are the server's own
-     * PAGES registry (galaxy/settings.py, identical on the testing
-     * and stable branches) — [GALAXY_PAGES] pins the full set and a
-     * test keeps the two from drifting apart. Pages NOT in the menu:
-     * slc (the Speed limit assist sheet), the profiles/personalities
-     * family (the personality surfaces), hub (the portal home, not a
+     * portal offers is missing here, and Addendum 150 (2026-11-27)
+     * added the personality family (profiles + personalities) the
+     * same way. Page ids are the server's own PAGES registry
+     * (galaxy/settings.py, identical on the testing and stable
+     * branches) — [GALAXY_PAGES] pins the full set and a test keeps
+     * the two from drifting apart. Pages NOT in the menu: slc (the
+     * Speed limit assist sheet), hub (the portal home, not a
      * settings page) and starport_options (StarPort management, its
-     * own parity item). Sub-pages (torque/developer,
-     * profiles/developer, tuning, per-sound editors) open through
-     * drill-in rows on their parent pages.
+     * own parity item). The four profile pages (traffic, aggressive,
+     * standard, relaxed) open through drill-in rows on the
+     * personalities page, and their twelve
+     * acceleration/braking/following sub-pages render inline on the
+     * parent profile page, exactly as the portal shows them.
+     * Other sub-pages (torque/developer, profiles/developer, tuning,
+     * per-sound editors) open through drill-in rows on their parent
+     * pages.
      */
     val SECTIONS: List<Pair<String, List<PageEntry>>> = listOf(
         "DRIVING" to listOf(
@@ -98,6 +104,10 @@ object GalaxySettings {
             PageEntry("aol", "Always-On Lateral", "Lateral control while disengaged"),
             PageEntry("conditional", "Conditional", "Conditional driving modes & triggers"),
             PageEntry("conditional/cem", "Conditional · CEM", "Conditional engagement modes")
+        ),
+        "PERSONALITY" to listOf(
+            PageEntry("profiles", "Long Planner", "Planner, force stops, global presets & saved profiles"),
+            PageEntry("personalities", "Driving Personalities", "Tune Aggressive, Standard, Relaxed & Traffic")
         ),
         "CONTROLS & COMMA" to listOf(
             PageEntry("wheel", "Wheel Controls", "Steering-wheel button actions"),
