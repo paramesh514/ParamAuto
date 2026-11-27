@@ -245,6 +245,16 @@ object MonitorSummary {
     }
 
     private fun tempText(json: JSONObject): String? {
+        // Current servers carry the temps under `vitals`
+        // (Addendum 149; API audit 2026-11-26).
+        json.optJSONObject("vitals")?.let { vitals ->
+            numberField(vitals, "cpuTempC")?.let {
+                return "${it.roundToInt()} °C"
+            }
+            numberField(vitals, "gpuTempC")?.let {
+                return "${it.roundToInt()} °C"
+            }
+        }
         numberField(json, "cpuTemp")?.let { return "${it.roundToInt()} °C" }
         numberField(json, "temperature")?.let { return "${it.roundToInt()} °C" }
         val temps = json.optJSONObject("temps") ?: return null
