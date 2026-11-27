@@ -5805,6 +5805,27 @@ class SettingsDialogs(private val activity: Activity) {
             )
         }
         body.addView(card)
+        // Addendum 150 (2026-11-27, Galaxy-parity mandate): the
+        // switcher above only picks the active profile — the
+        // per-profile tuning (follow/jerk numbers, acceleration /
+        // braking / following presets and custom curves) lives on
+        // the Galaxy personalities page, opened here in the visual
+        // page editor like every other Comma settings page.
+        val tuneCard = createGroupCard(pal)
+        tuneCard.addView(
+            createSettingsRow(
+                iconKind = SettingsIconView.Kind.TUNE,
+                title = "Tune profiles",
+                subtitle = "Following, jerk & presets for each profile",
+                pal = pal
+            ) {
+                dialog.dismiss()
+                showVisualSettingsPageDialog(
+                    client, "personalities", "Driving Personalities"
+                ) {}
+            }
+        )
+        body.addView(tuneCard)
         dialog.show()
     }
 
