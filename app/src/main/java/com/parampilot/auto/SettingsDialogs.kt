@@ -12,6 +12,7 @@ import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.text.InputType
 import android.text.TextUtils
@@ -26,6 +27,7 @@ import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -3694,7 +3696,7 @@ class SettingsDialogs(private val activity: Activity) {
                         pal = pal
                     ) {
                         dialog.dismiss()
-                        showSettingsPageDialog(
+                        showVisualSettingsPageDialog(
                             client, entry.id, entry.title, onUpdated
                         )
                     }
@@ -4379,6 +4381,828 @@ class SettingsDialogs(private val activity: Activity) {
                 content.addView(
                     noteView("This page has no settings to show.")
                 )
+            }
+        }
+
+        content.addView(noteView("Loading settings…"))
+        refresh(clearStatus = true)
+        dialog.show()
+    }
+
+    /**
+     * One Galaxy settings page in VISUAL form (Addendum 148, Param
+     * 2026-11-26: "Turn comma settings into visual format"). A live
+     * road scene ([RoadSceneView]) at the top reflects the page's
+     * real values — following gap, lane-centering strength, curve
+     * bend, speed sign — and every row renders as a visual card:
+     * sliders as gauges with steppers, selects as choice chips,
+     * switches as big toggles, sub-pages as scene nav cards. The
+     * plumbing is the classic editor's, unchanged: same fetch, same
+     * preview + confirm per edit in one session, same comma
+     * questions for actions and resets, same error text. A "Classic
+     * view" footer reopens the row editor for the same page.
+     */
+    fun showVisualSettingsPageDialog(
+        client: CommaClient?,
+        pageId: String,
+        fallbackTitle: String,
+        onUpdated: () -> Unit
+    ) {
+        val (dialog, body, pal) = createM3Dialog(
+            fallbackTitle,
+            "Visual settings — saved on the comma"
+        )
+        val baseUrl = SgGalaxyClient.baseUrlFor(
+            client?.getEffectiveNavigationEndpoint() ?: "192.168.68.9"
+        )
+        val sgClient = SgGalaxyClient(baseUrl)
+        var currentPage: GalaxySettings.Page? = null
+
+        val statusLine = TextView(activity).apply {
+            dpText(13f)
+            setTextColor(pal.textSecondary)
+            setPadding(dp(4), dp(12), dp(4), 0)
+        }
+        body.addView(statusLine)
+        val sceneView = RoadSceneView(activity).apply {
+            accentColor = pal.accentBlue
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(168)
+            ).apply { setMargins(0, dp(10), 0, dp(4)) }
+        }
+        body.addView(sceneView)
+        val content = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        body.addView(content)
+        body.addView(TextView(activity).apply {
+            text = "Classic view"
+            dpText(13.5f)
+            setTextColor(pal.accentBlue)
+            gravity = Gravity.CENTER
+            setPadding(dp(4), dp(14), dp(4), dp(2))
+            setOnClickListener {
+                dialog.dismiss()
+                showSettingsPageDialog(client, pageId, fallbackTitle, onUpdated)
+            }
+        })
+
+        fun noteView(text: String): TextView = TextView(activity).apply {
+            this.text = text
+            dpText(13.5f)
+            setTextColor(pal.textSecondary)
+            setPadding(dp(4), dp(6), dp(4), dp(6))
+        }
+
+        fun errorText(resp: JSONObject?, code: Int): String {
+            val server = resp?.optString("error", "")?.ifEmpty { null }
+            return when {
+                code == 401 ->
+                    (server ?: "Sign in to Galaxy") +
+                        " — settings need a local or Bluetooth connection"
+                server != null -> server
+                code == -1 || code == 0 ->
+                    "The comma didn't answer — check the connection"
+                else -> "Comma answered HTTP $code"
+            }
+        }
+
+        lateinit var render: (GalaxySettings.Page) -> Unit
+
+        fun refresh(clearStatus: Boolean) {
+            Thread {
+                val (code, resp) = sgClient.fetchSettingsPage(pageId)
+                val page = GalaxySettings.parsePage(resp)
+                activity.runOnUiThread {
+                    if (!dialog.isShowing) return@runOnUiThread
+                    if (code == 200 && page != null) {
+                        if (clearStatus) statusLine.text = ""
+                        render(page)
+                    } else if (currentPage == null) {
+                        content.removeAllViews()
+                        content.addView(
+                            noteView(
+                                "Couldn't load this page from the comma. " +
+                                    errorText(resp, code)
+                            )
+                        )
+                    }
+                }
+            }.start()
+        }
+
+        fun confirmIntent(intent: String) {
+            statusLine.text = "Saving…"
+            Thread {
+                val (code, resp) = sgClient.postSettingsConfirm(
+                    GalaxySettings.confirmBody(intent, pageId)
+                )
+                activity.runOnUiThread {
+                    if (!dialog.isShowing) return@runOnUiThread
+                    if (code == 200 &&
+                        resp?.optBoolean("saved", false) == true
+                    ) {
+                        statusLine.text = ""
+                        Toast.makeText(
+                            activity, "Saved on the comma",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        onUpdated()
+                        val fresh = GalaxySettings.parsePage(
+                            resp.optJSONObject("page")
+                        )
+                        if (fresh != null) {
+                            render(fresh)
+                        } else {
+                            refresh(clearStatus = true)
+                        }
+                    } else {
+                        statusLine.text = errorText(resp, code)
+                        if (code == 409) {
+                            refresh(clearStatus = false)
+                        } else {
+                            currentPage?.let { render(it) }
+                        }
+                    }
+                }
+            }.start()
+        }
+
+        fun previewFailed(resp: JSONObject?, code: Int) {
+            statusLine.text = errorText(resp, code)
+            if (code == 409) {
+                refresh(clearStatus = false)
+            } else {
+                currentPage?.let { render(it) }
+            }
+        }
+
+        fun askQuestion(
+            rowLabel: String,
+            question: String?,
+            intent: String
+        ) {
+            showSheetConfirm(
+                title = rowLabel,
+                message = question?.ifEmpty { null } ?: "Apply this change?",
+                positiveLabel = "Confirm",
+                onNegative = { currentPage?.let { render(it) } },
+                onPositive = { confirmIntent(intent) }
+            )
+        }
+
+        fun commitValue(index: Int, value: Any) {
+            val page = currentPage ?: return
+            statusLine.text = "Saving…"
+            Thread {
+                val (code, resp) = sgClient.postSettingsPreview(
+                    GalaxySettings.previewValueBody(page.view, index, value)
+                )
+                val intent = resp?.optString("intent", "")?.ifEmpty { null }
+                activity.runOnUiThread {
+                    if (!dialog.isShowing) return@runOnUiThread
+                    if (code == 200 && intent != null) {
+                        confirmIntent(intent)
+                    } else {
+                        previewFailed(resp, code)
+                    }
+                }
+            }.start()
+        }
+
+        fun reviewAction(index: Int, row: GalaxySettings.Row) {
+            val page = currentPage ?: return
+            statusLine.text = "Asking the comma…"
+            Thread {
+                val (code, resp) = sgClient.postSettingsPreview(
+                    GalaxySettings.previewDirectionBody(
+                        page.view, index, if (row.confirm) 0 else 1
+                    )
+                )
+                val intent = resp?.optString("intent", "")?.ifEmpty { null }
+                val question = resp?.optString("question", "")
+                activity.runOnUiThread {
+                    if (!dialog.isShowing) return@runOnUiThread
+                    if (code == 200 && intent != null) {
+                        statusLine.text = ""
+                        askQuestion(row.label, question, intent)
+                    } else {
+                        previewFailed(resp, code)
+                    }
+                }
+            }.start()
+        }
+
+        fun resetDefault(index: Int, row: GalaxySettings.Row) {
+            val page = currentPage ?: return
+            statusLine.text = "Asking the comma…"
+            Thread {
+                val (code, resp) = sgClient.postSettingsResetDefault(
+                    GalaxySettings.resetDefaultBody(page.view, index)
+                )
+                val intent = resp?.optString("intent", "")?.ifEmpty { null }
+                val question = resp?.optString("question", "")
+                activity.runOnUiThread {
+                    if (!dialog.isShowing) return@runOnUiThread
+                    if (code == 200 && intent != null) {
+                        statusLine.text = ""
+                        askQuestion(
+                            "Reset ${row.label}", question, intent
+                        )
+                    } else {
+                        previewFailed(resp, code)
+                    }
+                }
+            }.start()
+        }
+
+        /** Recompute the scene with one row's value swapped in, so
+         *  the road reacts the moment a control is touched — before
+         *  the comma's confirm comes back. */
+        fun previewScene(changedIndex: Int, newValue: String) {
+            val page = currentPage ?: return
+            val presentedRows = page.rows.mapIndexed { i, r ->
+                val presented = GalaxySettings.presented(r)
+                if (i == changedIndex) presented.copy(value = newValue)
+                else presented
+            }
+            sceneView.update(SettingsScene.from(presentedRows))
+        }
+
+        fun cardShell(): LinearLayout = createGroupCard(pal).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, dp(5), 0, dp(5)) }
+        }
+
+        fun cardLabel(row: GalaxySettings.Row): TextView =
+            TextView(activity).apply {
+                text = row.label
+                dpText(15f)
+                typeface = Typeface.create(
+                    "sans-serif-medium", Typeface.NORMAL
+                )
+                setTextColor(pal.textPrimary)
+                setPadding(dp(16), dp(12), dp(16), 0)
+            }
+
+        fun cardReason(row: GalaxySettings.Row): TextView =
+            TextView(activity).apply {
+                text = row.reason
+                dpText(12.5f)
+                setTextColor(pal.textSecondary)
+                setPadding(dp(16), dp(2), dp(16), 0)
+            }
+
+        render = { page ->
+            currentPage = page
+            sceneView.update(
+                SettingsScene.from(
+                    page.rows.map { GalaxySettings.presented(it) }
+                )
+            )
+            content.removeAllViews()
+            if (page.subtitle.isNotEmpty()) {
+                content.addView(noteView(page.subtitle))
+            }
+            if (!page.parked) {
+                content.addView(
+                    noteView(
+                        "You're on a drive — most settings lock until " +
+                            "you park. You can look; the comma refuses " +
+                            "changes in its own words."
+                    )
+                )
+            }
+            if (page.rows.isEmpty()) {
+                content.addView(
+                    noteView("This page has no settings to show.")
+                )
+            }
+
+            fun addResetRow(index: Int, row: GalaxySettings.Row) {
+                val defaultText = row.defaultValue?.let {
+                    GalaxySettings.valueWithUnit(row.copy(value = it))
+                }
+                content.addView(TextView(activity).apply {
+                    text = "Reset to default" +
+                        (defaultText?.let { " · $it" } ?: "")
+                    dpText(13f)
+                    setTextColor(pal.accentBlue)
+                    setPadding(dp(20), dp(2), dp(16), dp(8))
+                    setOnClickListener { resetDefault(index, row) }
+                })
+            }
+
+            page.rows.forEachIndexed { index, rawRow ->
+                val row = GalaxySettings.presented(rawRow)
+                when (GalaxySettings.control(row)) {
+                    GalaxySettings.Control.GROUP -> {
+                        val card = cardShell()
+                        val inner = LinearLayout(activity).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER_VERTICAL
+                            setPadding(dp(16), dp(14), dp(12), dp(14))
+                            addView(LinearLayout(activity).apply {
+                                orientation = LinearLayout.VERTICAL
+                                layoutParams = LinearLayout.LayoutParams(
+                                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+                                )
+                                addView(TextView(activity).apply {
+                                    text = row.label
+                                    dpText(15.5f)
+                                    typeface = Typeface.create(
+                                        "sans-serif-medium", Typeface.NORMAL
+                                    )
+                                    setTextColor(pal.textPrimary)
+                                })
+                                if (row.value.isNotEmpty()) {
+                                    addView(TextView(activity).apply {
+                                        text = row.value
+                                        dpText(12.5f)
+                                        setTextColor(pal.textSecondary)
+                                    })
+                                }
+                            })
+                            addView(TextView(activity).apply {
+                                text = "›"
+                                dpText(22f)
+                                setTextColor(pal.textSecondary)
+                            })
+                        }
+                        inner.setOnClickListener {
+                            showVisualSettingsPageDialog(
+                                client, rawRow.page, rawRow.label,
+                                onUpdated
+                            )
+                        }
+                        card.addView(inner)
+                        content.addView(card)
+                    }
+                    GalaxySettings.Control.SWITCH -> {
+                        val card = cardShell()
+                        val inner = LinearLayout(activity).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER_VERTICAL
+                            setPadding(dp(16), dp(10), dp(12), dp(10))
+                            addView(LinearLayout(activity).apply {
+                                orientation = LinearLayout.VERTICAL
+                                layoutParams = LinearLayout.LayoutParams(
+                                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+                                )
+                                addView(TextView(activity).apply {
+                                    text = row.label
+                                    dpText(15.5f)
+                                    typeface = Typeface.create(
+                                        "sans-serif-medium", Typeface.NORMAL
+                                    )
+                                    setTextColor(pal.textPrimary)
+                                })
+                                if (row.reason.isNotEmpty()) {
+                                    addView(TextView(activity).apply {
+                                        text = row.reason
+                                        dpText(12.5f)
+                                        setTextColor(pal.textSecondary)
+                                        maxLines = 2
+                                        ellipsize = TextUtils.TruncateAt.END
+                                    })
+                                }
+                            })
+                            val toggle = Switch(activity).apply {
+                                isChecked = row.value == "On"
+                                isEnabled = row.available
+                                scaleX = 1.25f
+                                scaleY = 1.25f
+                            }
+                            toggle.setOnCheckedChangeListener { _, checked ->
+                                previewScene(
+                                    index, if (checked) "On" else "Off"
+                                )
+                                commitValue(
+                                    index, if (checked) "On" else "Off"
+                                )
+                            }
+                            addView(toggle)
+                        }
+                        if (!row.available) card.alpha = 0.55f
+                        card.addView(inner)
+                        content.addView(card)
+                        if (row.available && rawRow.resetAvailable &&
+                            !GalaxySettings.isAtDefault(row)
+                        ) {
+                            addResetRow(index, row)
+                        }
+                    }
+                    GalaxySettings.Control.SELECT -> {
+                        if (!row.available) {
+                            val card = cardShell()
+                            card.addView(cardLabel(row))
+                            card.addView(TextView(activity).apply {
+                                text = row.value
+                                dpText(19f)
+                                typeface = Typeface.create(
+                                    "sans-serif-medium", Typeface.NORMAL
+                                )
+                                setTextColor(pal.textSecondary)
+                                setPadding(dp(16), dp(2), dp(16), dp(12))
+                            })
+                            card.alpha = 0.55f
+                            content.addView(card)
+                        } else if (row.choices.size <= 8) {
+                            val card = cardShell()
+                            card.addView(cardLabel(row))
+                            if (row.reason.isNotEmpty()) {
+                                card.addView(cardReason(row))
+                            }
+                            val chipRow = LinearLayout(activity).apply {
+                                orientation = LinearLayout.HORIZONTAL
+                                setPadding(dp(12), dp(10), dp(12), dp(12))
+                            }
+                            for (choice in row.choices) {
+                                val selected = choice == row.value
+                                chipRow.addView(TextView(activity).apply {
+                                    text = choice
+                                    dpText(14f)
+                                    typeface = Typeface.create(
+                                        "sans-serif-medium", Typeface.NORMAL
+                                    )
+                                    setTextColor(
+                                        if (selected) {
+                                            android.graphics.Color.WHITE
+                                        } else {
+                                            pal.textPrimary
+                                        }
+                                    )
+                                    setPadding(
+                                        dp(14), dp(8), dp(14), dp(8)
+                                    )
+                                    background = GradientDrawable().apply {
+                                        cornerRadius = dp(16).toFloat()
+                                        setColor(
+                                            if (selected) {
+                                                pal.accentBlue
+                                            } else {
+                                                pal.inputBg
+                                            }
+                                        )
+                                        if (!selected) {
+                                            setStroke(dp(1), pal.border)
+                                        }
+                                    }
+                                    layoutParams =
+                                        LinearLayout.LayoutParams(
+                                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                                            ViewGroup.LayoutParams.WRAP_CONTENT
+                                        ).apply {
+                                            setMargins(0, 0, dp(8), 0)
+                                        }
+                                    setOnClickListener {
+                                        previewScene(index, choice)
+                                        commitValue(index, choice)
+                                    }
+                                })
+                            }
+                            card.addView(HorizontalScrollView(activity).apply {
+                                isHorizontalScrollBarEnabled = false
+                                addView(chipRow)
+                            })
+                            content.addView(card)
+                            if (rawRow.resetAvailable &&
+                                !GalaxySettings.isAtDefault(row)
+                            ) {
+                                addResetRow(index, row)
+                            }
+                        } else {
+                            val card = cardShell()
+                            card.addView(cardLabel(row))
+                            card.addView(TextView(activity).apply {
+                                text = row.value + "  ›"
+                                dpText(17f)
+                                typeface = Typeface.create(
+                                    "sans-serif-medium", Typeface.NORMAL
+                                )
+                                setTextColor(pal.accentBlue)
+                                setPadding(dp(16), dp(2), dp(16), dp(12))
+                                setOnClickListener {
+                                    showSheetListPicker(
+                                        row.label, row.choices, row.value
+                                    ) { picked ->
+                                        previewScene(index, picked)
+                                        commitValue(index, picked)
+                                    }
+                                }
+                            })
+                            content.addView(card)
+                            if (rawRow.resetAvailable &&
+                                !GalaxySettings.isAtDefault(row)
+                            ) {
+                                addResetRow(index, row)
+                            }
+                        }
+                    }
+                    GalaxySettings.Control.SLIDER -> {
+                        val bounds = GalaxySettings.numericBounds(row)!!
+                        val hasAuto = row.choices.contains("Auto")
+                        val numericMax = GalaxySettings.snapNumeric(
+                            bounds.second, bounds.first,
+                            bounds.second, bounds.third
+                        )
+                        val isLane = rawRow.displayScale == "lane-strength"
+                        val card = cardShell()
+                        val gauge = GaugeView(activity).apply {
+                            accentColor = pal.accentBlue
+                            layoutParams = LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT
+                            ).apply {
+                                setMargins(dp(16), dp(2), dp(16), 0)
+                            }
+                        }
+                        fun gaugeFor(display: Double) {
+                            gauge.setValue(
+                                (display - bounds.first) /
+                                    (bounds.second - bounds.first),
+                                ((bounds.second - bounds.first) /
+                                    bounds.third).roundToInt()
+                            )
+                        }
+                        fun commitDisplay(displayValue: Double) {
+                            if (isLane) {
+                                val saved = GalaxySettings.laneStrengthSaved(
+                                    displayValue, rawRow.minimum,
+                                    rawRow.maximum
+                                )
+                                if (saved == null) {
+                                    statusLine.text =
+                                        "Pick a value from 1 to 10"
+                                } else {
+                                    // The scene reads presented
+                                    // (display-scale) values.
+                                    previewScene(
+                                        index,
+                                        GalaxySettings.formatNumber(
+                                            displayValue
+                                        )
+                                    )
+                                    commitValue(index, saved)
+                                }
+                            } else {
+                                previewScene(
+                                    index,
+                                    GalaxySettings.formatNumber(displayValue)
+                                )
+                                commitValue(index, displayValue)
+                            }
+                        }
+                        fun stepBy(dir: Int) {
+                            if (!row.available) return
+                            if (row.value == "Auto") {
+                                if (dir < 0) {
+                                    gaugeFor(numericMax)
+                                    commitDisplay(numericMax)
+                                } else {
+                                    statusLine.text = "Already Auto"
+                                }
+                                return
+                            }
+                            val current = row.value.toDoubleOrNull()
+                                ?: return
+                            if (dir > 0 && hasAuto &&
+                                current >= numericMax
+                            ) {
+                                previewScene(index, "Auto")
+                                commitValue(index, "Auto")
+                                return
+                            }
+                            val target = GalaxySettings.snapNumeric(
+                                current + dir * bounds.third,
+                                bounds.first, bounds.second, bounds.third
+                            )
+                            if (target == current) {
+                                statusLine.text = if (dir > 0) {
+                                    "Already at the maximum"
+                                } else {
+                                    "Already at the minimum"
+                                }
+                                return
+                            }
+                            gaugeFor(target)
+                            commitDisplay(target)
+                        }
+                        val header = LinearLayout(activity).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER_VERTICAL
+                            setPadding(dp(16), dp(12), dp(16), 0)
+                            addView(LinearLayout(activity).apply {
+                                orientation = LinearLayout.VERTICAL
+                                layoutParams = LinearLayout.LayoutParams(
+                                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+                                )
+                                addView(TextView(activity).apply {
+                                    text = row.label
+                                    dpText(15f)
+                                    typeface = Typeface.create(
+                                        "sans-serif-medium", Typeface.NORMAL
+                                    )
+                                    setTextColor(pal.textPrimary)
+                                })
+                            })
+                            addView(TextView(activity).apply {
+                                text = GalaxySettings.valueWithUnit(row)
+                                dpText(19f)
+                                typeface = Typeface.create(
+                                    "sans-serif-medium", Typeface.NORMAL
+                                )
+                                setTextColor(pal.accentBlue)
+                                isClickable = row.available
+                                setOnClickListener {
+                                    if (!row.available) {
+                                        return@setOnClickListener
+                                    }
+                                    val container =
+                                        LinearLayout(activity).apply {
+                                            orientation =
+                                                LinearLayout.VERTICAL
+                                            setPadding(0, dp(8), 0, 0)
+                                        }
+                                    val input = createInputBox(
+                                        if (row.value == "Auto") {
+                                            ""
+                                        } else {
+                                            row.value
+                                        },
+                                        "Value", pal
+                                    )
+                                    input.inputType =
+                                        InputType.TYPE_CLASS_NUMBER or
+                                        InputType.TYPE_NUMBER_FLAG_DECIMAL or
+                                        InputType.TYPE_NUMBER_FLAG_SIGNED
+                                    container.addView(input)
+                                    showSheetConfirm(
+                                        title = row.label,
+                                        message = null,
+                                        positiveLabel = "Save",
+                                        content = container,
+                                        onPositive = {
+                                            val text = input.text
+                                                .toString().trim()
+                                            when {
+                                                hasAuto && text.equals(
+                                                    "Auto", true
+                                                ) -> {
+                                                    previewScene(
+                                                        index, "Auto"
+                                                    )
+                                                    commitValue(
+                                                        index, "Auto"
+                                                    )
+                                                }
+                                                else -> {
+                                                    val parsed =
+                                                        text.toDoubleOrNull()
+                                                    if (parsed == null) {
+                                                        statusLine.text =
+                                                            "Enter a number" +
+                                                            if (hasAuto) {
+                                                                " — or Auto"
+                                                            } else {
+                                                                ""
+                                                            }
+                                                    } else if (isLane) {
+                                                        commitDisplay(
+                                                            parsed.coerceIn(
+                                                                1.0, 10.0
+                                                            )
+                                                        )
+                                                    } else {
+                                                        commitDisplay(
+                                                            GalaxySettings
+                                                                .snapNumeric(
+                                                                    parsed,
+                                                                    bounds.first,
+                                                                    bounds.second,
+                                                                    bounds.third
+                                                                )
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    )
+                                }
+                            })
+                        }
+                        card.addView(header)
+                        if (row.reason.isNotEmpty()) {
+                            card.addView(cardReason(row))
+                        }
+                        row.value.toDoubleOrNull()?.let { gaugeFor(it) }
+                        card.addView(gauge)
+                        val stepper = LinearLayout(activity).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER_VERTICAL
+                            setPadding(dp(12), dp(4), dp(12), dp(12))
+                            addView(createTonalButton("−", pal) {
+                                stepBy(-1)
+                            }.apply { isEnabled = row.available })
+                            addView(View(activity).apply {
+                                layoutParams = LinearLayout.LayoutParams(
+                                    0, 1, 1f
+                                )
+                            })
+                            if (hasAuto && row.value != "Auto") {
+                                addView(
+                                    createTonalButton("Auto", pal) {
+                                        previewScene(index, "Auto")
+                                        commitValue(index, "Auto")
+                                    }.apply {
+                                        isEnabled = row.available
+                                        layoutParams =
+                                            LinearLayout.LayoutParams(
+                                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                                ViewGroup.LayoutParams.WRAP_CONTENT
+                                            ).apply {
+                                                setMargins(0, 0, dp(10), 0)
+                                            }
+                                    }
+                                )
+                            }
+                            addView(createTonalButton("+", pal) {
+                                stepBy(1)
+                            }.apply { isEnabled = row.available })
+                        }
+                        card.addView(stepper)
+                        if (!row.available) card.alpha = 0.55f
+                        content.addView(card)
+                        if (rawRow.resetAvailable &&
+                            !GalaxySettings.isAtDefault(row)
+                        ) {
+                            addResetRow(index, row)
+                        }
+                    }
+                    GalaxySettings.Control.ACTION -> {
+                        val card = cardShell()
+                        val inner = LinearLayout(activity).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER_VERTICAL
+                            setPadding(dp(16), dp(11), dp(12), dp(11))
+                            addView(LinearLayout(activity).apply {
+                                orientation = LinearLayout.VERTICAL
+                                layoutParams = LinearLayout.LayoutParams(
+                                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+                                )
+                                addView(TextView(activity).apply {
+                                    text = row.label
+                                    dpText(15f)
+                                    typeface = Typeface.create(
+                                        "sans-serif-medium", Typeface.NORMAL
+                                    )
+                                    setTextColor(pal.textPrimary)
+                                })
+                                if (row.reason.isNotEmpty()) {
+                                    addView(TextView(activity).apply {
+                                        text = row.reason
+                                        dpText(12.5f)
+                                        setTextColor(pal.textSecondary)
+                                        maxLines = 2
+                                        ellipsize = TextUtils.TruncateAt.END
+                                    })
+                                }
+                            })
+                            addView(
+                                createTonalButton(
+                                    GalaxySettings.actionLabel(row), pal
+                                ) {
+                                    reviewAction(index, row)
+                                }.apply { isEnabled = row.available }
+                            )
+                        }
+                        if (!row.available) card.alpha = 0.55f
+                        card.addView(inner)
+                        content.addView(card)
+                    }
+                    GalaxySettings.Control.READOUT -> {
+                        val card = cardShell()
+                        card.addView(cardLabel(row))
+                        card.addView(TextView(activity).apply {
+                            text = GalaxySettings.valueWithUnit(row)
+                                .ifEmpty { "—" }
+                            dpText(21f)
+                            typeface = Typeface.create(
+                                "sans-serif-medium", Typeface.NORMAL
+                            )
+                            setTextColor(pal.accentBlue)
+                            setPadding(dp(16), dp(2), dp(16), dp(12))
+                        })
+                        if (row.reason.isNotEmpty()) {
+                            card.addView(cardReason(row).apply {
+                                setPadding(dp(16), 0, dp(16), dp(10))
+                            })
+                        }
+                        content.addView(card)
+                    }
+                }
             }
         }
 
