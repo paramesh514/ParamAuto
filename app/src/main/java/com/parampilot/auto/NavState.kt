@@ -324,24 +324,31 @@ data class TelemetryPacket(
             // maneuver again (the 2026-11-06 lane-blink fix).
             val nav: NavManeuver = SgInstruction.parse(instr, navStatus)
 
-            val plotsSpeed: Double? = plots?.let {
+            // The server wraps the plot signals in a `values`
+            // envelope (Addendum 149; API audit 2026-11-26):
+            // {schemaVersion, state, values: {...signals} | null
+            // when stale}. Older servers sent the fields flat —
+            // accept both. A null `values` reads as no signals:
+            // speed falls back to phone GPS, controls read off.
+            val signals = plots?.let { it.optJSONObject("values") ?: it }
+            val plotsSpeed: Double? = signals?.let {
                 if (it.has("speedMps") && !it.isNull("speedMps")) {
                     it.optDouble("speedMps", Double.NaN).takeUnless { v -> v.isNaN() }
                 } else null
             }
             val speedMs = plotsSpeed ?: gpsSpeedMs
-            val cruiseActive = plots?.let {
+            val cruiseActive = signals?.let {
                 it.has("controlsActive") && !it.isNull("controlsActive") &&
                     it.optBoolean("controlsActive", false)
             } == true
-            val lateralActive = plots?.optBoolean("lateralControlActive", false) == true
-            val longitudinalActive = plots?.optBoolean("longitudinalControlActive", false) == true
-            val controlsFresh = plots?.optBoolean("controlsFresh", false) == true
-            val poseFresh = plots?.optBoolean("poseFresh", false) == true
-            val lateralPid = plots?.optDouble("lateralPid", 0.0) ?: 0.0
-            val longitudinalPid = plots?.optDouble("longitudinalPid", 0.0) ?: 0.0
-            val desiredAccel = plots?.optDouble("desiredLongitudinalAccel", plots.optDouble("desiredAccelMps2", 0.0)) ?: 0.0
-            val actualAccel = plots?.optDouble("actualLongitudinalAccel", plots.optDouble("actualAccelMps2", 0.0)) ?: 0.0
+            val lateralActive = signals?.optBoolean("lateralControlActive", false) == true
+            val longitudinalActive = signals?.optBoolean("longitudinalControlActive", false) == true
+            val controlsFresh = signals?.optBoolean("controlsFresh", false) == true
+            val poseFresh = signals?.optBoolean("poseFresh", false) == true
+            val lateralPid = signals?.optDouble("lateralPid", 0.0) ?: 0.0
+            val longitudinalPid = signals?.optDouble("longitudinalPid", 0.0) ?: 0.0
+            val desiredAccel = signals?.optDouble("desiredLongitudinalAccel", signals.optDouble("desiredAccelMps2", 0.0)) ?: 0.0
+            val actualAccel = signals?.optDouble("actualLongitudinalAccel", signals.optDouble("actualAccelMps2", 0.0)) ?: 0.0
 
             val plotsLive = if (plots != null) {
                 GalaxyPlotsLive(

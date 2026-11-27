@@ -15,6 +15,34 @@ class ModelManagerRepository(private val client: SgGalaxyClient) {
         private const val TAG = "ModelManagerRepo"
         private const val PATH_MODELS_DOWNLOAD = "/api/models/download"
         private const val PATH_MODELS_DELETE = "/api/models/delete"
+
+        /**
+         * The training-results parse (Addendum 149; API audit
+         * 2026-11-26). Current servers send
+         * `current {status, fresh, ageSeconds, progress {samples,
+         * blocks, requiredBlocks}}`; the older `training` object
+         * and the flat shape stay accepted.
+         */
+        fun parseFlmStatus(json: JSONObject): GalaxyFlmStatus {
+            val training = json.optJSONObject("training")
+                ?: json.optJSONObject("current") ?: json
+            val progress = training.optJSONObject("progress") ?: training
+            return GalaxyFlmStatus(
+                status = training.optString("status", "unknown"),
+                fresh = training.optBoolean("fresh", false),
+                ageSeconds = training.optLong("ageSeconds", 0L),
+                samples = progress.optInt(
+                    "samples", training.optInt("samples", 0)
+                ),
+                blocks = progress.optInt(
+                    "blocks", training.optInt("blocks", 0)
+                ),
+                requiredBlocks = progress.optInt(
+                    "requiredBlocks",
+                    training.optInt("requiredBlocks", 8)
+                )
+            )
+        }
     }
 
     /**
@@ -294,14 +322,6 @@ class ModelManagerRepository(private val client: SgGalaxyClient) {
      */
     fun getFlmCalibration(): GalaxyFlmStatus? {
         val json = client.getJson(SgGalaxyClient.PATH_FLM) ?: return null
-        val training = json.optJSONObject("training") ?: json
-        return GalaxyFlmStatus(
-            status = training.optString("status", "unknown"),
-            fresh = training.optBoolean("fresh", false),
-            ageSeconds = training.optLong("ageSeconds", 0L),
-            samples = training.optInt("samples", 0),
-            blocks = training.optInt("blocks", 0),
-            requiredBlocks = training.optInt("requiredBlocks", 8)
-        )
+        return parseFlmStatus(json)
     }
 }
