@@ -344,9 +344,31 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
 
     private var lastIdleInvalidateMs = 0L
 
+    /** Last time the on-screen frame was persisted for the next
+     *  session's seed (Addendum 153, B8). */
+    private var lastFrameSaveMs = 0L
+
+    /**
+     * Persists the frame currently on screen as the next
+     * session's seed (B8), throttled — plus a final save from
+     * onDestroy. A frame is only worth seeding with the view it
+     * belongs to, which the renderer reports via currentFrameInfo.
+     */
+    private fun saveLastCarFrame(force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (!force && now - lastFrameSaveMs < 30_000L) return
+        val info = mapRenderer.currentFrameInfo() ?: return
+        lastFrameSaveMs = now
+        CarLastFrameCache.saveAsync(
+            carContext.applicationContext,
+            info.bitmap, info.lat, info.lng, info.zoom, info.source, info.isNight
+        )
+    }
+
     private val freshnessTicker = object : Runnable {
         override fun run() {
             drawMapOnSurface()
+            saveLastCarFrame()
             // Idle keep-alive (Param, 2026-11-06: "keep search zoom in
             // zoom out button always visible when navigation is not
             // active"): the Search action strip and the zoom map strip
@@ -375,6 +397,21 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
         NavStateManager.appContext = carContext.applicationContext
         CommaTileDiskCache.init(carContext.applicationContext)
         MapFrameDiskCache.init(carContext.applicationContext)
+        // Last-frame seed (Addendum 153, B8): open on the previous
+        // session's real map while the first fresh fetch runs —
+        // the car counterpart of the phone's startup frame. Only a
+        // frame whose day/night matches this session's is seeded.
+        try {
+            CarLastFrameCache.load(carContext.applicationContext)?.let { saved ->
+                if (saved.source != CarMapRenderer.BitmapSource.NONE &&
+                    saved.isNight == ThemeManager.isCarNightMode(carContext)
+                ) {
+                    mapRenderer.seedLastFrame(
+                        saved.bitmap, saved.source, saved.lat, saved.lng, saved.zoom, saved.isNight
+                    )
+                }
+            }
+        } catch (e: Exception) { android.util.Log.w("ParamAuto", "Ignored failure: ${e.javaClass.simpleName}: ${e.message}") }
         try {
             org.maplibre.android.MapLibre.getInstance(carContext.applicationContext)
         } catch (e: Exception) { android.util.Log.w("ParamAuto", "Ignored failure: ${e.javaClass.simpleName}: ${e.message}") }
@@ -510,6 +547,8 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
         if (autoDriveEnabled && SimulationEngine.isSimulating) {
             SimulationEngine.stop()
         }
+        // Final last-frame save for the next session's seed (B8).
+        try { saveLastCarFrame(force = true) } catch (e: Exception) { android.util.Log.w("ParamAuto", "Ignored failure: ${e.javaClass.simpleName}: ${e.message}") }
         try {
             val carNavManager = carContext.getCarService(androidx.car.app.navigation.NavigationManager::class.java)
             carNavManager.clearNavigationManagerCallback()
@@ -556,10 +595,22 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
     }
 
     override fun onClick(x: Float, y: Float) {
+        val container = surfaceContainer
+        val w = (container?.width ?: 800).toFloat()
+        val h = (container?.height ?: 480).toFloat()
+        // No-map Retry pill (Addendum 153, B2): when the source
+        // plan failed and the map is showing its failure state,
+        // the pill is a real button — tapping it re-runs the plan.
+        val hasPosition = NavStateManager.currentGps != null ||
+            NavStateManager.activeDestination != null
+        if (mapRenderer.mapStatusKind(hasPosition) == MapLoadState.Kind.UNAVAILABLE &&
+            mapRenderer.mapRetryRect(w, h).contains(x, y)
+        ) {
+            mapRenderer.retryMap()
+            drawMapOnSurface()
+            return
+        }
         if (isRecenterActive()) {
-            val container = surfaceContainer
-            val w = (container?.width ?: 800).toFloat()
-            val h = (container?.height ?: 480).toFloat()
             val isNavRunning = NavStateManager.activeDestination != null
             val hitRect = mapRenderer.getRecenterRect(w, h, isNavRunning)
             if (hitRect.contains(x, y) || (x in (w * 0.35f)..(w * 0.65f) && y > (h - 130f))) {
@@ -1219,39 +1270,42 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
         val actionStripBuilder = ActionStrip.Builder()
             .addAction(searchAction)
 
+        // Alternate routes (Addendum 153, C3/C4): the Alt action
+        // cycles through EVERY route in order and is titled with
+        // the offered route's own total time; the Routes action
+        // opens the chooser list, the primary selection surface.
+        // Selection goes through CarRouteSelection, which honors
+        // the comma's answer — a rejected change reverts instead
+        // of silently desyncing. The strip holds at most four
+        // actions, so while alternates exist, Alt + Routes take
+        // the Bookmark action's slot (Bookmark returns when the
+        // comma offers a single route again).
         val altRoutes = NavStateManager.activeRoutes
         if (altRoutes.size > 1) {
-            val currentSelId = NavStateManager.selectedRouteId
-            val nextRoute = altRoutes.firstOrNull { it.id != currentSelId } ?: altRoutes[0]
-            val diff = nextRoute.durationMin - (route?.durationMin ?: nextRoute.durationMin)
-            val diffStr = when {
-                diff > 0 -> "+$diff m"
-                diff < 0 -> "$diff m"
-                else -> "${nextRoute.durationMin}m"
+            val nextRoute = RouteChoice.next(altRoutes, NavStateManager.selectedRouteId)
+            if (nextRoute != null) {
+                actionStripBuilder.addAction(
+                    Action.Builder()
+                        .setTitle(RouteChoice.altButtonTitle(nextRoute))
+                        .setOnClickListener {
+                            CarRouteSelection.select(carContext, client, nextRoute) {
+                                invalidate()
+                            }
+                        }
+                        .build()
+                )
             }
             actionStripBuilder.addAction(
                 Action.Builder()
-                    .setTitle("Alt ($diffStr)")
+                    .setTitle("Routes")
                     .setOnClickListener {
-                        NavStateManager.selectedRouteId = nextRoute.id
-                        NavStateManager.notifyChanged()
-                        val ip = NavStateManager.commaIp ?: client.commaIp
-                        if (!ip.isNullOrBlank()) {
-                            Thread {
-                                NavigationManager().selectRouteSg(
-                                    SgGalaxyClient.baseUrlFor(ip),
-                                    nextRoute.id,
-                                    NavStateManager.sgRevision
-                                )
-                            }.start()
-                        }
-                        invalidate()
+                        screenManager.push(RoutesScreen(carContext, client))
                     }
                     .build()
             )
+        } else {
+            actionStripBuilder.addAction(bookmarkAction)
         }
-
-        actionStripBuilder.addAction(bookmarkAction)
         actionStripBuilder.addAction(endAction)
 
         val actionStrip = actionStripBuilder.build()
