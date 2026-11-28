@@ -120,6 +120,22 @@ class CarMapRenderer {
 
     private val isFetching = AtomicBoolean(false)
 
+    /**
+     * Outcome of the last full source-plan attempt (Addendum 153):
+     * a plan that produced no frame is a failure the no-map state
+     * can name via [MapLoadState] — and offer Retry for — instead
+     * of the bare grid that made "loading" and "dead" look the
+     * same (diagnosis B2).
+     */
+    @Volatile
+    private var lastPlanFailed: Boolean = false
+
+    /** Night mode the current frame was fetched for; the
+     *  last-frame cache (B8) only seeds a frame whose day/night
+     *  matches the new session's. */
+    @Volatile
+    private var lastFrameNight: Boolean = false
+
     // Byte-capped at 16 MB (audit finding 49; was 64 tiles by count).
 
     // Hoisted paints (review C6): configurations that are identical on every
@@ -152,6 +168,14 @@ class CarMapRenderer {
     private val paintAltRouteLine by lazy { Paint().apply { color = GoogleMapsLook.ALT_ROUTE; strokeWidth = 5.5f; style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND; isAntiAlias = true } }
     private val paintWatermark by lazy { Paint().apply { color = 0x66FFFFFF; textSize = 12f; typeface = Typeface.DEFAULT_BOLD; textAlign = Paint.Align.RIGHT; isAntiAlias = true } }
     private val paintStaleBg by lazy { Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xD9B3261E.toInt(); style = Paint.Style.FILL } }
+    // No-map status + alternate-route labels (Addendum 153).
+    private val paintMapStatusBg by lazy { Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xCC1E1F20.toInt(); style = Paint.Style.FILL } }
+    private val paintMapStatusText by lazy { Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = 17f; typeface = Typeface.create("sans-serif-medium", Typeface.BOLD); textAlign = Paint.Align.CENTER } }
+    private val paintRetryBg by lazy { Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF1E1F20.toInt(); style = Paint.Style.FILL } }
+    private val paintRetryBorder by lazy { Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF3C4043.toInt(); strokeWidth = 1.6f; style = Paint.Style.STROKE } }
+    private val paintRetryText by lazy { Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF8AB4F8.toInt(); textSize = 15f; typeface = Typeface.DEFAULT_BOLD; textAlign = Paint.Align.CENTER } }
+    private val paintAltLabelBg by lazy { Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xE61E1F20.toInt(); style = Paint.Style.FILL } }
+    private val paintAltLabelText by lazy { Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = 13f; typeface = Typeface.DEFAULT_BOLD; textAlign = Paint.Align.CENTER } }
 
     /** Reused route-path scratch (render-thread confined). */
     private val scratchRoutePath = Path()
@@ -269,7 +293,12 @@ class CarMapRenderer {
                 // is available (until 2026-11-03 the online stitch ran
                 // first and its key-free tiles always "succeeded", so
                 // Mapbox never appeared even with a token saved), then
-                // the full stitch (disk cache + OpenStreetMap).
+                // the full stitch (disk cache + OpenStreetMap). A
+                // source that yields no frame falls through to the
+                // next one the plan allows (Addendum 153, B1); only
+                // when every allowed source has failed does the
+                // no-map state get declared (B2).
+                lastFrameNight = isNight
                 var mapLoaded = false
                 for (source in MapSourceChoice.aaPlan(isCommaLan, mapboxToken != null)) {
                     if (mapLoaded) break
@@ -282,15 +311,95 @@ class CarMapRenderer {
                             fetchStitchedTiles(lat, lng, zoom, bearing, isNight, routePolyline, onBitmapReady)
                     }
                 }
+                lastPlanFailed = !mapLoaded
             } catch (e: Exception) {
                 android.util.Log.e("CarMapRenderer", "Map fetch error: ${e.message}")
                 try {
-                    fetchStitchedTiles(lat, lng, zoom, bearing, isNight, routePolyline, onBitmapReady)
-                } catch (e: Exception) { android.util.Log.w("ParamAuto", "Ignored failure: ${e.javaClass.simpleName}: ${e.message}") }
+                    lastPlanFailed = !fetchStitchedTiles(lat, lng, zoom, bearing, isNight, routePolyline, onBitmapReady)
+                } catch (e2: Exception) {
+                    lastPlanFailed = true
+                    android.util.Log.w("ParamAuto", "Ignored failure: ${e2.javaClass.simpleName}: ${e2.message}")
+                }
             } finally {
                 isFetching.set(false)
             }
         }
+    }
+
+    /** What the no-frame state currently is (Addendum 153, B2),
+     *  decided in layer 2 ([MapLoadState]). */
+    fun mapStatusKind(hasPosition: Boolean): MapLoadState.Kind = MapLoadState.kind(
+        hasFrame = currentFrame.get() != null,
+        fetchInFlight = isFetching.get(),
+        planFailed = lastPlanFailed,
+        hasPosition = hasPosition
+    )
+
+    /** The Retry pill's rect in the no-map state — the same math
+     *  [drawMapStatus] draws with, so NavScreen's tap handler
+     *  hit-tests exactly what is on screen. */
+    fun mapRetryRect(w: Float, h: Float): RectF {
+        val pillW = 150f
+        val pillH = 46f
+        val cx = w * 0.5f
+        val top = h * 0.44f + 16f
+        return RectF(cx - pillW * 0.5f, top, cx + pillW * 0.5f, top + pillH)
+    }
+
+    /**
+     * The user tapped Retry on the no-map state: clear the
+     * recorded failure so the state reads as loading again; the
+     * redraw NavScreen triggers next runs the source plan (with
+     * no frame on screen, no fetch gate can hold it back).
+     */
+    fun retryMap() {
+        lastPlanFailed = false
+    }
+
+    /** The frame currently on screen, with the view it belongs
+     *  to — NavScreen persists it via [CarLastFrameCache] (B8). */
+    data class FrameInfo(
+        val bitmap: Bitmap,
+        val source: BitmapSource,
+        val lat: Double,
+        val lng: Double,
+        val zoom: Double,
+        val isNight: Boolean
+    )
+
+    fun currentFrameInfo(): FrameInfo? {
+        val frame = currentFrame.get() ?: return null
+        if (frame.bitmap.isRecycled) return null
+        if (lastFetchLat == 0.0 && lastFetchLng == 0.0) return null
+        return FrameInfo(
+            bitmap = frame.bitmap,
+            source = frame.source,
+            lat = lastFetchLat,
+            lng = lastFetchLng,
+            zoom = lastFetchZoom,
+            isNight = lastFrameNight
+        )
+    }
+
+    /**
+     * Seeds the previous session's last frame (Addendum 153,
+     * B8) so the map opens on a real map while the first fresh
+     * fetch runs. Deliberately does NOT touch [lastFetchTimeMs]:
+     * the seed is a backdrop, never fetched state, so the first
+     * [requestMapUpdate] still fetches immediately.
+     */
+    fun seedLastFrame(
+        bitmap: Bitmap,
+        source: BitmapSource,
+        lat: Double,
+        lng: Double,
+        zoom: Double,
+        isNight: Boolean
+    ) {
+        if (currentFrame.get() != null) return
+        lastFrameNight = isNight
+        setCachedMapBitmap(bitmap, source)
+        recordFetch(lat, lng, zoom, 0.0, null)
     }
 
     /** Key for [staticImageCache]: view state rounded so near-identical views share an image. */
@@ -471,58 +580,136 @@ class CarMapRenderer {
         val c = Canvas(stitched)
         c.drawColor(if (isNight) ThemeManager.COLOR_MD_BG else 0xFFF8F9FA.toInt())
 
-        val fetchedTiles = java.util.concurrent.ConcurrentHashMap<String, MapTileProvider.TileResult>()
-        val missingTiles = ArrayList<Pair<Int, Int>>()
+        val tileCoords = ArrayList<Pair<Int, Int>>()
         for (tx in minTx..maxTx) {
             for (ty in minTy..maxTy) {
-                missingTiles.add(tx to ty)
+                tileCoords.add(tx to ty)
             }
         }
-        if (missingTiles.isNotEmpty()) {
-            val futures = missingTiles.map { (tx, ty) ->
-                tileStitchExecutor.submit {
-                    val key = "$z/$tx/$ty"
-                    val res = tileProvider.getTileResult(z, tx, ty, isNight, commaOnly)
-                    if (res != null) {
-                        fetchedTiles[key] = res
-                    }
-                }
+        val totalExpected = tileCoords.size
+        if (totalExpected == 0) {
+            try { stitched.recycle() } catch (e: Exception) { android.util.Log.w("ParamAuto", "Ignored failure: ${e.javaClass.simpleName}: ${e.message}") }
+            return false
+        }
+
+        // Progressive stitch (Addendum 153, B3/B4): tiles are
+        // drawn into the frame AS THEY ARRIVE, and the frame is
+        // published as soon as it passes StitchPolicy's threshold
+        // — the first usable frame appears fast instead of the
+        // whole stitch being discarded when the slowest tiles
+        // miss one shared deadline. Tiles still outstanding at
+        // the deadline keep filling the published frame in via
+        // the drain below, rather than the partial frame sitting
+        // patchy until some movement gate triggers a refetch.
+        val completion = java.util.concurrent.ExecutorCompletionService<Triple<Int, Int, MapTileProvider.TileResult?>>(tileStitchExecutor)
+        for ((tx, ty) in tileCoords) {
+            completion.submit(java.util.concurrent.Callable {
+                Triple(tx, ty, tileProvider.getTileResult(z, tx, ty, isNight, commaOnly))
+            })
+        }
+        val publishAt = StitchPolicy.publishThreshold(totalExpected, hasCurrentFrame = currentFrame.get() != null)
+        var tilesLoaded = 0
+        var tilesCompleted = 0
+        var commaTileCount = 0
+        var published = false
+        val deadline = System.currentTimeMillis() + StitchPolicy.FIRST_PHASE_DEADLINE_MS
+        while (tilesCompleted < totalExpected) {
+            val remainingMs = deadline - System.currentTimeMillis()
+            if (remainingMs <= 0L) break
+            val future = try {
+                completion.poll(remainingMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+            } catch (e: InterruptedException) {
+                break
+            } ?: break
+            tilesCompleted++
+            val (tx, ty, res) = try {
+                future.get()
+            } catch (e: Exception) {
+                continue
             }
-            val deadline = System.currentTimeMillis() + 3000L
-            futures.forEach {
-                val remaining = (deadline - System.currentTimeMillis()).coerceAtLeast(100L)
-                try { it.get(remaining, java.util.concurrent.TimeUnit.MILLISECONDS) } catch (e: Exception) { android.util.Log.w("ParamAuto", "Ignored failure: ${e.javaClass.simpleName}: ${e.message}") }
+            if (res != null && !res.bitmap.isRecycled && !stitched.isRecycled) {
+                val dstX = (tx * 256.0 - leftPx).toFloat()
+                val dstY = (ty * 256.0 - topPx).toFloat()
+                c.drawBitmap(res.bitmap, dstX, dstY, null)
+                tilesLoaded++
+                if (res.isCommaLocal) commaTileCount++
+                if (!published && tilesLoaded >= publishAt) {
+                    val src = if (commaTileCount == tilesLoaded && commaTileCount > 0) BitmapSource.COMMA_LOCAL else BitmapSource.OSM
+                    setCachedMapBitmap(stitched, src)
+                    recordFetch(lat, lng, zoom, bearing, routePolyline)
+                    published = true
+                }
+                if (published) onBitmapReady()
             }
         }
 
-        var tilesLoaded = 0
-        var commaTileCount = 0
-        for (tx in minTx..maxTx) {
-            for (ty in minTy..maxTy) {
-                val key = "$z/$tx/$ty"
-                val res = fetchedTiles[key]
-                if (res != null && !res.bitmap.isRecycled) {
+        val usable = StitchPolicy.isUsable(tilesLoaded, totalExpected)
+        if (published) {
+            android.util.Log.i("CarMapRenderer", "Map stitched ($tilesLoaded/$totalExpected tiles, comma=$commaTileCount): ${bmpW}x${bmpH}")
+            if (tilesCompleted < totalExpected) {
+                scheduleStitchDrain(
+                    completion, totalExpected - tilesCompleted, c, stitched,
+                    leftPx, topPx, onBitmapReady
+                )
+            }
+            return usable
+        }
+        // Never published: nothing arrived (the plan falls
+        // through to its next source, B1) or a displayed frame
+        // stays up because this stitch never reached the bar for
+        // replacing it.
+        try { stitched.recycle() } catch (e: Exception) { android.util.Log.w("ParamAuto", "Ignored failure: ${e.javaClass.simpleName}: ${e.message}") }
+        return false
+    }
+
+    /**
+     * Background fill-in for a published partial stitch
+     * (Addendum 153, B4): keeps consuming the stitch's tile
+     * completions and draws late tiles into the SAME bitmap the
+     * driver is already looking at, so a half-blank map completes
+     * itself instead of waiting for a movement-gated refetch.
+     * Stops when the frame is replaced, recycled, or the drain
+     * deadline passes; tiles that never arrive stay background —
+     * visibly unfinished only until the next gated refetch.
+     */
+    private fun scheduleStitchDrain(
+        completion: java.util.concurrent.ExecutorCompletionService<Triple<Int, Int, MapTileProvider.TileResult?>>,
+        remainingTiles: Int,
+        canvas: Canvas,
+        stitched: Bitmap,
+        leftPx: Double,
+        topPx: Double,
+        onBitmapReady: () -> Unit
+    ) {
+        tileStitchExecutor.execute {
+            var left = remainingTiles
+            val drainDeadline = System.currentTimeMillis() + StitchPolicy.DRAIN_DEADLINE_MS
+            while (left > 0) {
+                if (stitched.isRecycled) return@execute
+                if (currentFrame.get()?.bitmap !== stitched) return@execute
+                val remainMs = drainDeadline - System.currentTimeMillis()
+                if (remainMs <= 0L) return@execute
+                val future = try {
+                    completion.poll(remainMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                } catch (e: InterruptedException) {
+                    return@execute
+                } ?: return@execute
+                left--
+                val (tx, ty, res) = try {
+                    future.get()
+                } catch (e: Exception) {
+                    continue
+                }
+                if (res != null && !res.bitmap.isRecycled && !stitched.isRecycled &&
+                    currentFrame.get()?.bitmap === stitched
+                ) {
                     val dstX = (tx * 256.0 - leftPx).toFloat()
                     val dstY = (ty * 256.0 - topPx).toFloat()
-                    c.drawBitmap(res.bitmap, dstX, dstY, null)
-                    tilesLoaded++
-                    if (res.isCommaLocal) commaTileCount++
+                    canvas.drawBitmap(res.bitmap, dstX, dstY, null)
+                    onBitmapReady()
                 }
             }
         }
-
-        val totalExpected = (maxTx - minTx + 1) * (maxTy - minTy + 1)
-        if (tilesLoaded >= (totalExpected / 2).coerceAtLeast(1)) {
-            val src = if (commaTileCount == tilesLoaded && commaTileCount > 0) BitmapSource.COMMA_LOCAL else BitmapSource.OSM
-            setCachedMapBitmap(stitched, src)
-            recordFetch(lat, lng, zoom, bearing, routePolyline)
-            android.util.Log.i("CarMapRenderer", "Map stitched ($tilesLoaded tiles, comma=$commaTileCount): ${bmpW}x${bmpH}")
-            onBitmapReady()
-            return true
-        } else {
-            try { stitched.recycle() } catch (e: Exception) { android.util.Log.w("ParamAuto", "Ignored failure: ${e.javaClass.simpleName}: ${e.message}") }
-        }
-        return false
     }
 
     fun render(
@@ -542,8 +729,17 @@ class CarMapRenderer {
         isNorthUp: Boolean,
         onNeedRedraw: () -> Unit
     ) {
-        val lat = gps?.latitude ?: dest?.latitude ?: 33.4484
-        val lng = gps?.longitude ?: dest?.longitude ?: -112.0740
+        // Position: a real fix, else the destination, else
+        // NOTHING (Addendum 153, B6). The pre-153 fallback was a
+        // hard-coded Phoenix coordinate, so a session that started
+        // before the first fix opened on a map of the wrong place
+        // and loaded tiles for it. NavScreen already seeds the
+        // last known location into the GPS it passes in; when even
+        // that does not exist yet, the map holds its no-frame
+        // state ("Waiting for GPS…") instead of inventing a place.
+        val hasPosition = gps != null || dest != null
+        val lat = gps?.latitude ?: dest?.latitude ?: 0.0
+        val lng = gps?.longitude ?: dest?.longitude ?: 0.0
         val bearing = if (isNorthUp) 0.0 else (gps?.bearing ?: 0.0)
 
         // Request a background refresh of the base map: a Mapbox static image
@@ -551,7 +747,9 @@ class CarMapRenderer {
         // unavailable. Route changes invalidate the Mapbox bitmap because its
         // overlay is part of the image.
         val polyline = route?.geometry ?: (route?.points?.takeIf { it.size >= 2 }?.let { NavigationManager.encodePolyline(it) })
-        requestMapUpdate(lat, lng, zoom, bearing, token, isNight, polyline, onNeedRedraw)
+        if (hasPosition) {
+            requestMapUpdate(lat, lng, zoom, bearing, token, isNight, polyline, onNeedRedraw)
+        }
 
         // ------------------------------------------------------------------------
         // LAYER 1 (Z=1): Base Canvas Background Surface (Section 7.2)
@@ -564,6 +762,11 @@ class CarMapRenderer {
         canvas.drawColor(if (isNight) ThemeManager.COLOR_MD_BG else 0xFFF8F9FA.toInt())
         if (!hasBitmap) {
             drawPerspectiveGrid(canvas, w, h)
+            // The no-frame state says what it is (Addendum 153,
+            // B2): loading, waiting for GPS, or failed — with a
+            // Retry pill when the plan failed. A bare grid made
+            // all three look identical.
+            drawMapStatus(canvas, w, h, hasPosition)
         }
 
         // ------------------------------------------------------------------------
@@ -669,8 +872,15 @@ class CarMapRenderer {
         // ------------------------------------------------------------------------
         val baseIsMapbox = hasBitmap && bmpSource == BitmapSource.MAPBOX
         if (!baseIsMapbox) {
-            drawRouteGeometry(canvas, w, h, route, dest, lat, lng, zoom)
+            drawRouteGeometry(canvas, w, h, route, dest, lat, lng, zoom, mapRotation)
             drawRouteFeatureMarkers(canvas, w, h, lat, lng, zoom)
+        } else {
+            // Addendum 153 (C2): alternates are drawn on Mapbox
+            // frames too, as a canvas overlay — the selected route
+            // stays the one baked into the static image, but the
+            // alternates (with their time/distance labels) are
+            // visible in every map mode, not only on stitch frames.
+            drawRouteGeometry(canvas, w, h, route, dest, lat, lng, zoom, mapRotation, alternatesOnly = true)
         }
 
         if (mapRotated) canvas.restore()
@@ -1602,19 +1812,30 @@ class CarMapRenderer {
         dest: NavDestination?,
         centerLat: Double,
         centerLng: Double,
-        zoom: Double
+        zoom: Double,
+        canvasRotation: Float = 0f,
+        alternatesOnly: Boolean = false
     ) {
         val allRoutes = NavStateManager.activeRoutes
         val selectedId = NavStateManager.selectedRouteId
-        // Draw alternative routes first (in de-emphasized slate)
+        // Draw alternative routes first (in de-emphasized slate),
+        // each with its time/distance label (Addendum 153, C3 —
+        // they used to be anonymous lines with nothing to judge
+        // or tap against).
         if (allRoutes.size > 1) {
             for (alt in allRoutes) {
                 if (alt.id != selectedId && alt.points.size >= 2) {
-                    drawRoutePath(canvas, w, h, alt.points, centerLat, centerLng, zoom, isAlt = true)
+                    val mid = drawRoutePath(canvas, w, h, alt.points, centerLat, centerLng, zoom, isAlt = true)
+                    if (mid != null) {
+                        drawAltRouteLabel(canvas, mid, alt, canvasRotation, w, h)
+                    }
                 }
             }
         }
-        // Draw selected/active route
+        // Draw selected/active route — skipped on Mapbox frames
+        // (alternatesOnly), where the selected route is already
+        // baked into the static image.
+        if (alternatesOnly) return
         if (route != null && route.points.size >= 2) {
             drawRoutePath(canvas, w, h, route.points, centerLat, centerLng, zoom, isAlt = false)
         } else if (dest != null && dest.hasCoordinates && route == null) {
@@ -1689,6 +1910,11 @@ class CarMapRenderer {
         canvas.drawText(emoji, cx, cy - (fm.ascent + fm.descent) / 2f, paintEmoji)
     }
 
+    /**
+     * Draws one route polyline; returns the screen point at the
+     * polyline's middle, which the alternate-route label anchors
+     * to (Addendum 153, C3). Null when there is nothing to draw.
+     */
     private fun drawRoutePath(
         canvas: Canvas,
         w: Float,
@@ -1698,8 +1924,8 @@ class CarMapRenderer {
         centerLng: Double,
         zoom: Double,
         isAlt: Boolean
-    ) {
-        if (pts.isEmpty()) return
+    ): PointF? {
+        if (pts.isEmpty()) return null
         val z = zoom.roundToInt().coerceIn(10, 18)
         val n = 1 shl z
 
@@ -1715,6 +1941,8 @@ class CarMapRenderer {
         // and a Path per route on every frame.
         val path = scratchRoutePath
         path.reset()
+        var midPoint: PointF? = null
+        val midIndex = pts.size / 2
         for (i in pts.indices) {
             val pxExact = (pts[i].longitude + 180.0) / 360.0 * n
             val pLatRad = Math.toRadians(pts[i].latitude)
@@ -1726,6 +1954,7 @@ class CarMapRenderer {
             } else {
                 path.lineTo(px, py)
             }
+            if (i == midIndex) midPoint = PointF(px, py)
         }
 
         if (isAlt) {
@@ -1737,6 +1966,61 @@ class CarMapRenderer {
             canvas.drawPath(path, paintRouteCasing)
             canvas.drawPath(path, paintRouteGlow)
             canvas.drawPath(path, paintRouteLine)
+        }
+        return midPoint
+    }
+
+    /**
+     * The alternate route's label pill ("24 min · 3.2 mi") at the
+     * polyline's midpoint (Addendum 153, C3). Drawn inside the
+     * map's rotation transform like the line itself, but
+     * counter-rotated so the text stays upright and readable.
+     * Anchors outside the surface are skipped — a label for a
+     * route whose middle is off-screen would only mislead.
+     */
+    private fun drawAltRouteLabel(
+        canvas: Canvas,
+        anchor: PointF,
+        route: RouteOption,
+        canvasRotation: Float,
+        w: Float,
+        h: Float
+    ) {
+        if (anchor.x < 50f || anchor.x > w - 50f || anchor.y < 30f || anchor.y > h - 30f) return
+        val text = RouteChoice.labelText(route)
+        val pillW = paintAltLabelText.measureText(text) + 22f
+        val pillH = 27f
+        canvas.save()
+        canvas.translate(anchor.x, anchor.y)
+        if (canvasRotation != 0f) canvas.rotate(-canvasRotation)
+        val rect = RectF(-pillW * 0.5f, -pillH * 0.5f, pillW * 0.5f, pillH * 0.5f)
+        canvas.drawRoundRect(rect, 13.5f, 13.5f, paintAltLabelBg)
+        canvas.drawText(text, 0f, 4.5f, paintAltLabelText)
+        canvas.restore()
+    }
+
+    /**
+     * The no-frame state's words (Addendum 153, B2): the
+     * [MapLoadState] line centred on the grid, plus the Retry
+     * pill when the source plan failed. The pill's rect is
+     * [mapRetryRect] — NavScreen hit-tests taps against it.
+     */
+    private fun drawMapStatus(canvas: Canvas, w: Float, h: Float, hasPosition: Boolean) {
+        val kind = mapStatusKind(hasPosition)
+        val text = MapLoadState.statusText(kind) ?: return
+        val cx = w * 0.5f
+        val textY = h * 0.44f
+        // Soft backing so the words stay readable over the grid.
+        val textW = paintMapStatusText.measureText(text)
+        val backing = RectF(cx - textW * 0.5f - 16f, textY - 26f, cx + textW * 0.5f + 16f, textY + 12f)
+        canvas.drawRoundRect(backing, 12f, 12f, paintMapStatusBg)
+        canvas.drawText(text, cx, textY, paintMapStatusText)
+        if (MapLoadState.offersRetry(kind)) {
+            val rect = mapRetryRect(w, h)
+            canvas.drawRoundRect(RectF(rect.left, rect.top + 2f, rect.right, rect.bottom + 2f), 23f, 23f, paintDropShadow)
+            canvas.drawRoundRect(rect, 23f, 23f, paintRetryBg)
+            canvas.drawRoundRect(rect, 23f, 23f, paintRetryBorder)
+            canvas.drawText("Retry", rect.centerX(), rect.centerY() + 5f, paintRetryText)
         }
     }
 
