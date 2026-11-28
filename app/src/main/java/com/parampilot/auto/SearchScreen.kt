@@ -59,6 +59,21 @@ class SearchScreen(
      * instead of claiming no results exist. */
     private var lastSearchCommaError: String? = null
 
+    /** True while a typed query's NETWORK search is in flight
+     * (Addendum 154, A2): the list keeps showing the local
+     * matches plus a "Searching…" row instead of the template's
+     * full-screen loading state, which hid everything and read
+     * as broken. The full-screen state ([isLoading]) now belongs
+     * only to a destination send. */
+    private var searchPending: Boolean = false
+
+    /** The last query whose network search completed (hit or
+     * miss). A typed query that differs from it still has its
+     * search to come — during the debounce, or in flight — so
+     * the list shows "Searching…" rather than a bare empty
+     * state (Addendum 154, A2). */
+    private var searchSettledQuery: String? = null
+
     init {
         // Backstop: if this screen is torn down mid-entry (popped, session
         // ended), destination entry is over — stop feeding phone GPS.
@@ -97,7 +112,10 @@ class SearchScreen(
         }
         searchQuery = searchText
         noResultsForQuery = null
-        if (searchText.isEmpty()) isLoading = false
+        if (searchText.isEmpty()) {
+            isLoading = false
+            searchPending = false
+        }
         searchResults.clear()
         if (searchText.length >= 2) {
             val starredMatches = Bookmarks.getStarred(carContext).filter {
@@ -161,6 +179,8 @@ class SearchScreen(
             noResultsForQuery = if (cached.isEmpty()) query else null
             lastSearchCommaError = null
             isLoading = false
+            searchPending = false
+            searchSettledQuery = query
             invalidate()
             return
         }
@@ -175,11 +195,16 @@ class SearchScreen(
             noResultsForQuery = query
             lastSearchCommaError = null
             isLoading = false
+            searchPending = false
+            searchSettledQuery = query
             invalidate()
             return
         }
 
-        isLoading = true
+        // Network phase (A2): NOT the template's full-screen
+        // loading state — the local matches stay on screen with
+        // a "Searching…" row under them until this completes.
+        searchPending = true
         invalidate()
         Thread {
             val token = client.mapboxToken ?: NavStateManager.mapboxToken
@@ -242,6 +267,8 @@ class SearchScreen(
                             null
                         }
                     isLoading = false
+                    searchPending = false
+                    searchSettledQuery = query
                     invalidate()
                 }
             }
@@ -401,6 +428,17 @@ class SearchScreen(
                         ).show()
                         try { screenManager.pop() } catch (e: Exception) { android.util.Log.w("ParamAuto", "Ignored failure: ${e.javaClass.simpleName}: ${e.message}") }
                     } else {
+                        // Addendum 154 (D1): this branch used to
+                        // leave isLoading set, stranding the
+                        // template on its loading spinner — the
+                        // destination had no coordinates and was
+                        // not a comma suggestion, so nothing was
+                        // queued and only this toast ran — until
+                        // the user happened to edit the search
+                        // text. The send is over; the spinner must
+                        // end with it.
+                        isLoading = false
+                        invalidate()
                         CarToast.makeText(
                             carContext,
                             "Destination NOT accepted by the comma — ${NavigationManager.lastSendError ?: "not connected"}",
@@ -421,28 +459,39 @@ class SearchScreen(
      */
     private fun shortcutSubtitle(gps: GpsPosition?, dest: NavDestination): String? {
         if (gps == null || !dest.hasCoordinates) return null
-        val miles = GuidanceMath.haversineM(gps.latitude, gps.longitude, dest.latitude, dest.longitude) / Units.METERS_PER_MILE
-        val etaMin = (miles / 25.0 * 60.0).roundToInt().coerceAtLeast(1)
-        return "$etaMin min · ${"%.1f".format(miles)} mi"
+        // The one shared estimate (SearchRowText, Addendum 154):
+        // the search result rows now show the same line, computed
+        // the same way.
+        return SearchRowText.etaDistanceText(
+            GuidanceMath.haversineM(gps.latitude, gps.longitude, dest.latitude, dest.longitude)
+        )
     }
 
+
+    /** The "Searching…" row shown while a typed query's network
+     *  search is pending (Addendum 154, A2). */
+    private fun searchingRow(): Row = Row.Builder()
+        .setTitle("Searching…")
+        .build()
 
     override fun onGetTemplate(): Template {
         val listBuilder = ItemList.Builder()
 
-        // Search budget meter (Feature 6) — the same label the phone's
-        // search bar shows, from the same shared usage state.
-        val budgetLabel = MapboxUsage.labelFor(NavStateManager.mapboxUsage)
-        if (budgetLabel != null && searchQuery.isEmpty()) {
-            listBuilder.addItem(
-                Row.Builder()
-                    .setTitle(budgetLabel)
-                    .build()
-            )
-        }
+        // Addendum 154 (A4): the Mapbox budget meter row is GONE
+        // from the car search home. It was a dead, non-clickable
+        // row occupying the prime slot above Home/Work on every
+        // search open; the meter still lives on the phone's
+        // search bar, where it belongs.
 
+        // Queue lock visibility (Addendum 154, A6): while a
+        // destination is queued, its row — with the cancel
+        // action — rides at the top of EVERY state of this
+        // screen, typed results included. Before, it only existed
+        // on the empty-query home, so a driver looking at results
+        // got every tap refused with a transient toast and no
+        // visible reason or remedy.
         val queuedDest = NavStateManager.queuedDestination
-        if (queuedDest != null && searchQuery.isEmpty()) {
+        if (queuedDest != null) {
             listBuilder.addItem(
                 Row.Builder()
                     .setTitle(CarScreenNotice.capForCar(DestinationQueue.label(queuedDest, NavStateManager.queuedOutOfSync, NavStateManager.commaNetworks)))
@@ -460,21 +509,53 @@ class SearchScreen(
         }
 
         if (searchResults.isNotEmpty()) {
-            for (dest in searchResults.take(6)) {
-                val distStr = dest.distanceM?.let { m ->
-                    val mi = m / Units.METERS_PER_MILE
-                    if (mi < 10) " (${"%.1f".format(mi)} mi)" else " (${mi.toInt()} mi)"
-                } ?: ""
-
+            // Result rows (Addendum 154, A3): the place's own
+            // address — never the literal placeholder "Location"
+            // — plus the same distance + ETA line the Home/Work
+            // rows show, computed from the current GPS for
+            // coordinate-bearing results (comma suggestions carry
+            // no coordinates; their source distance is used when
+            // present). Tapping a row opens the place preview
+            // (A1); nothing reaches the comma until Navigate.
+            val gps = NavStateManager.currentGps
+            for (dest in searchResults.take(MAX_RESULTS)) {
                 listBuilder.addItem(
                     Row.Builder()
-                        .setTitle("${dest.name}$distStr")
-                        .addText(dest.placeName.ifEmpty { "Location" })
-                        .setOnClickListener { onDestinationSelected(dest) }
+                        .setTitle(dest.name)
+                        .apply {
+                            SearchRowText.addressLine(dest.placeName, dest.name)
+                                ?.let { addText(it) }
+                            val etaText = when {
+                                dest.hasCoordinates && gps != null ->
+                                    SearchRowText.etaDistanceText(
+                                        GuidanceMath.haversineM(
+                                            gps.latitude, gps.longitude,
+                                            dest.latitude, dest.longitude
+                                        )
+                                    )
+                                dest.distanceM != null ->
+                                    SearchRowText.etaDistanceText(dest.distanceM!!)
+                                else -> null
+                            }
+                            etaText?.let { addText(it) }
+                        }
+                        .setOnClickListener {
+                            screenManager.push(
+                                PlacePreviewScreen(carContext, dest) { chosen ->
+                                    onDestinationSelected(chosen)
+                                }
+                            )
+                        }
                         .build()
                 )
             }
+            if (searchPending || searchQuery != searchSettledQuery) {
+                listBuilder.addItem(searchingRow())
+            }
         } else if (!isLoading && noResultsForQuery != null && noResultsForQuery == searchQuery) {
+            // No results (Addendum 154, A5): the row itself is
+            // the retry — tapping re-runs the search — instead of
+            // a dead end whose only exit was retyping.
             listBuilder.addItem(
                 Row.Builder()
                     .setTitle(
@@ -484,8 +565,16 @@ class SearchScreen(
                             lastSearchCommaError
                         )
                     )
+                    .addText("Tap to retry")
+                    .setOnClickListener { performSearch(searchQuery) }
                     .build()
             )
+        } else if (!isLoading && searchQuery.length >= 2 && searchQuery != searchSettledQuery) {
+            // A fresh query whose search has not landed yet
+            // (Addendum 154, A2): say so. This state used to add
+            // NO rows at all — a bare empty list that read as
+            // "search is broken".
+            listBuilder.addItem(searchingRow())
         } else if (searchQuery.isEmpty() && !isLoading) {
             // Search home: shortcuts first, then most visited — all local.
             // Home/Work come from the canonical Bookmarks definitions; the
@@ -644,5 +733,11 @@ class SearchScreen(
         /** How long the search text must be stable before the
          * auto-search runs (voice completion + typing pauses). */
         const val AUTO_SEARCH_DELAY_MS = 800L
+
+        /** Result rows shown at once (Addendum 154, A3): raised
+         * from 6 — the SearchTemplate's ItemList carries no
+         * lower cap in the car-app library, and hosts that
+         * render fewer rows truncate the tail themselves. */
+        const val MAX_RESULTS = 10
     }
 }

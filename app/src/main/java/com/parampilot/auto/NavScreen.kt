@@ -620,8 +620,11 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
     }
 
     override fun onScale(focusX: Float, focusY: Float, scaleFactor: Float) {
-        val newZoom = if (scaleFactor > 1f) currentZoom + 0.5 else currentZoom - 0.5
-        currentZoom = newZoom.coerceIn(10.0, 18.0)
+        // Proportional pinch steps (Addendum 154, D3): the step
+        // follows the gesture's actual scale factor via
+        // PinchZoom, instead of a flat ±0.5 per event no matter
+        // how far the fingers moved.
+        currentZoom = (currentZoom + PinchZoom.step(scaleFactor)).coerceIn(10.0, 18.0)
         drawMapOnSurface()
     }
 
