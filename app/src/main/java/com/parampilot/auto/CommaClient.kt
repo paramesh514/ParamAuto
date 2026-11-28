@@ -2832,11 +2832,13 @@ class CommaClient(private val context: Context) {
 
     /**
      * "Use phone speed limit" data fetch: the comma's payload carries
-     * no speed limit anywhere, so when the toggle is on AND the saved
-     * Mapbox token may be used (the Mapbox key toggle) AND a token
-     * exists, fetch Mapbox Directions annotations for the adopted
-     * route once per route. Failures leave the series unset — the
-     * sign simply shows no limit, never an invented one.
+     * no speed limit anywhere, so with the toggle on the adopted
+     * route's limit series is fetched from the phone sources in the
+     * maps order (Addendum 161): Google Roads, then Mapbox
+     * Directions maxspeed annotations, then OpenStreetMap maxspeed
+     * ways — each only when usable under its own key gate, OSM
+     * key-free last. Failures leave the series unset — the sign
+     * simply shows no limit, never an invented one.
      */
     @Volatile
     private var googleBudgetSwitchInFlight = false
@@ -2912,12 +2914,21 @@ class CommaClient(private val context: Context) {
         // phone internet there are no phone data fetches — the
         // comma's own limit (or none) is what shows.
         if (!NavStateManager.phoneInternet) return
-        val token = (mapboxToken ?: NavStateManager.mapboxToken)?.trim()?.takeIf { it.isNotBlank() }
-        // Google Roads is the speed-limit source when the phone
-        // Google key may be used (Param, 2026-11-18); Mapbox remains
-        // the fallback when Google is off, keyless, or its fetch fails.
+        // The source order is the maps order (Addendum 161, Param
+        // 2026-11-28): Google, then Mapbox, then OpenStreetMap —
+        // decided in layer 2 (PhoneSourceOrder) from each source's
+        // existing usability gate (Google: PhoneGoogle's key gate;
+        // Mapbox: the key toggle + token via MapSourceChoice). OSM
+        // is key-free, so the plan always has a last resort; the
+        // Cloud gate above has already removed phone data entirely
+        // on Cloud transport.
         val googleKey = PhoneGoogle.effectiveGoogleKey()
-        if (token.isNullOrBlank() && googleKey == null) return
+        val token = MapSourceChoice.effectiveMapboxToken(mapboxToken)
+        val plan = PhoneSourceOrder.plan(
+            googleUsable = googleKey != null,
+            mapboxUsable = token != null,
+            phoneDataAllowed = true
+        )
         val dest = NavStateManager.activeDestination ?: return
         if (!dest.hasCoordinates || route.points.size < 2) return
         val origin = route.points.first()
@@ -2940,28 +2951,30 @@ class CommaClient(private val context: Context) {
         if (!routeLimitsInFlight.compareAndSet(false, true)) return
         Thread({
             try {
-                var seriesSource = "mapbox"
-                val series = if (googleKey != null) {
-                    val googleSeries = NavigationManager()
-                        .fetchGoogleRouteLimits(route.points, googleKey)
-                    if (googleSeries != null) {
-                        seriesSource = "google"
-                        googleSeries
-                    } else if (!token.isNullOrBlank()) {
-                        NavigationManager().fetchMapboxRouteLimits(
-                            origin.latitude, origin.longitude,
-                            dest.latitude, dest.longitude, token!!
-                        )
-                    } else {
-                        null
+                // Try the planned sources in the maps order; the
+                // first that produces a series wins and a failure
+                // falls through to the next (Addendum 161). Every
+                // source failing leaves no series — the sign shows
+                // no limit, never an invented one.
+                var series: MaxspeedAnnotations.Series? = null
+                var seriesSource = PhoneSourceOrder.limitSourceLabel(PhoneSourceOrder.Source.OSM)
+                for (source in plan) {
+                    val fetched = when (source) {
+                        PhoneSourceOrder.Source.GOOGLE ->
+                            NavigationManager().fetchGoogleRouteLimits(route.points, googleKey!!)
+                        PhoneSourceOrder.Source.MAPBOX ->
+                            NavigationManager().fetchMapboxRouteLimits(
+                                origin.latitude, origin.longitude,
+                                dest.latitude, dest.longitude, token!!
+                            )
+                        PhoneSourceOrder.Source.OSM ->
+                            NavigationManager().fetchOsmRouteLimits(route.points)
                     }
-                } else if (!token.isNullOrBlank()) {
-                    NavigationManager().fetchMapboxRouteLimits(
-                        origin.latitude, origin.longitude,
-                        dest.latitude, dest.longitude, token!!
-                    )
-                } else {
-                    null
+                    if (fetched != null) {
+                        series = fetched
+                        seriesSource = PhoneSourceOrder.limitSourceLabel(source)
+                        break
+                    }
                 }
                 if (series != null && isStillSelectedRoute(fp)) {
                     lastRouteLimitKey = key
