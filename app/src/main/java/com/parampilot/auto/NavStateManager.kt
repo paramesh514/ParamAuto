@@ -512,8 +512,10 @@ object NavStateManager {
     var routeLimitSeries: MaxspeedAnnotations.Series? = null
 
     /** Which phone provider produced [routeLimitSeries]: "google"
-     *  (Roads API) or "mapbox" (Directions maxspeed). Labels the
-     *  displayed limit's source honestly (Param, 2026-11-18). */
+     *  (Roads API), "mapbox" (Directions maxspeed) or "osm"
+     *  (OpenStreetMap maxspeed ways) — the maps source order of
+     *  Addendum 161. Labels the displayed limit's source honestly
+     *  (Param, 2026-11-18). */
     @Volatile
     var routeLimitSource: String = "mapbox"
 
@@ -920,7 +922,8 @@ object NavStateManager {
         // on LAN/Bluetooth does not linger into a Cloud session.
         if (!HeartbeatTransport.phoneDataAllowed(activeTransport)) {
             if (latestPacket?.speedLimit?.source == "mapbox" ||
-                latestPacket?.speedLimit?.source == "google"
+                latestPacket?.speedLimit?.source == "google" ||
+                latestPacket?.speedLimit?.source == "osm"
             ) {
                 speedLimitMph = 0
                 updateLatestPacket { cur -> cur.copy(speedLimit = SpeedLimitInfo()) }

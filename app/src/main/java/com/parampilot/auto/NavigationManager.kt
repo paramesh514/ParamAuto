@@ -476,6 +476,56 @@ class NavigationManager {
     }
 
     /**
+     * Fetches speed limits along the route from OpenStreetMap via
+     * the Overpass API: ways carrying a maxspeed tag within the
+     * corridor of the route line (an around query over sample
+     * points spaced ~200 m — the same sweep as the stop signs, the
+     * same endpoint, no key). The key-free last resort of the phone
+     * speed-limit source order (Addendum 161). Returns the series,
+     * or null on any failure or when OSM has no tagged limit along
+     * the route — no limit is shown then, never an invented one.
+     */
+    fun fetchOsmRouteLimits(routePoints: List<LatLng>): MaxspeedAnnotations.Series? {
+        if (routePoints.size < 2) return null
+        val samples = RouteFeatures.samplePoints(routePoints, spacingM = 200.0)
+        val coords = samples.joinToString(",") {
+            String.format(java.util.Locale.US, "%.6f,%.6f", it.latitude, it.longitude)
+        }
+        val ql = "[out:json][timeout:25];way[\"maxspeed\"]" +
+            "(around:${OsmMaxspeed.CORRIDOR_M.toInt()},$coords);out geom;"
+        var conn: HttpURLConnection? = null
+        return try {
+            UsageCounters.count(UsageCounters.OSM_OVERPASS)
+            conn = (URL("https://overpass-api.de/api/interpreter").openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 10000
+                readTimeout = 30000
+                doOutput = true
+                setRequestProperty("User-Agent", "ParamAuto/1.0")
+                setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+            }
+            val payload = "data=" + URLEncoder.encode(ql, "UTF-8")
+            conn.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+            if (conn.responseCode != 200) {
+                val err = conn.errorStream?.bufferedReader()?.use { it.readText() }
+                Log.w(TAG, "Overpass maxspeed fetch failed HTTP ${conn.responseCode}: $err")
+                return null
+            }
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            val series = OsmMaxspeed.buildSeries(
+                routePoints, OsmMaxspeed.parseWays(JSONObject(body))
+            )
+            Log.i(TAG, "OSM route limits loaded: ${series?.limitsMph?.count { it != null }} limits for ${series?.points?.size} points")
+            series
+        } catch (e: Exception) {
+            Log.w(TAG, "Overpass maxspeed fetch failed: ${e.message}")
+            null
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    /**
      * Resolves exact coordinates for a SearchBox suggestion via /retrieve/{mapbox_id}.
      */
     fun retrievePlace(dest: NavDestination, token: String): NavDestination? {
