@@ -1257,6 +1257,24 @@ class SettingsDialogs(private val activity: Activity) {
             iconTileBg = pal.accentAmberTonalBg,
             pal = pal
         ) { showCamerasDialog(client) })
+        driveCard.addView(createDivider(pal))
+
+        // Sentry events (Galaxy-parity day 4, gap #19): the comma's
+        // stored Sentry motion events with their photos, delete, and
+        // notification state — GET /api/sentry/events (+ image,
+        // delete, notifications). The dialog loads nothing over
+        // Bluetooth, like the Galaxy portal.
+        driveCard.addView(createSettingsRow(
+            iconKind = SettingsIconView.Kind.CAMERA,
+            title = "Sentry events",
+            subtitle = "Motion events from the parked car · photos & delete",
+            iconTint = pal.accentAmber,
+            iconTileBg = pal.accentAmberTonalBg,
+            pal = pal
+        ) {
+            dialog.dismiss()
+            SentryEventsDialog.show(activity, client)
+        })
         body.addView(driveCard)
 
 
