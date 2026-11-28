@@ -1456,6 +1456,14 @@ class CommaClient(private val context: Context) {
     private var lastLocalAccessIp: String? = null
 
     /**
+     * The comma's LAN address as last learned from the comma itself
+     * (Addendum 156), for display in the connection surfaces
+     * (Addendum 157). Read-only: learning stays with the heartbeat
+     * and failover paths that write [lastLocalAccessIp].
+     */
+    fun getLearnedLocalIp(): String? = lastLocalAccessIp
+
+    /**
      * Learns the comma's current LAN address while the BLE bridge is
      * healthy: GET /api/local-access is proxied by the bridge to the
      * comma's loopback Galaxy server, which answers with the addresses
