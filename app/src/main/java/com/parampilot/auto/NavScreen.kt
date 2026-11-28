@@ -900,7 +900,6 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
                         NavStateManager.queuedDestination = null
                         NavStateManager.queuedOutOfSync = false
                     }
-                    DestinationHistory.record(carContext, dest)
                     NavStateManager.activeDestination = dest
                     NavStateManager.setNavClearedByUser(false)
                     NavStateManager.activeTurnCue = "Head toward ${dest.name}"
@@ -1062,7 +1061,6 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
                     // session and runs until navigation ends (Param,
                     // 2026-11-03).
                     if (!feederTarget.isNullOrBlank()) PhoneGpsFeeder.startNavigationSession(feederTarget)
-                    DestinationHistory.record(carContext, dest)
                     NavStateManager.activeDestination = dest
                     NavStateManager.setNavClearedByUser(false)
                     NavStateManager.activeTurnCue = "Head toward ${dest.name}"
@@ -1387,12 +1385,12 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
         }
         .build()
 
-    /** buildNavTemplate, Home action (extracted 2026-11-08). User-configured Home lives in Bookmarks. */
+    /** buildNavTemplate, Home action (extracted 2026-11-08). Home is the comma favorite labeled "home" (Addendum 158). */
     private fun buildHomeAction(): Action = Action.Builder()
         .setIcon(homeIcon)
         .setTitle("Home")
         .setOnClickListener {
-            val currentHome = Bookmarks.getHome(carContext)
+            val currentHome = NavStateManager.commaHome
             if (currentHome != null) {
                 startRoute(currentHome)
             } else {
@@ -1401,12 +1399,12 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
         }
         .build()
 
-    /** buildNavTemplate, Work action (extracted 2026-11-08). User-configured Office lives in Bookmarks. */
+    /** buildNavTemplate, Work action (extracted 2026-11-08). Work is the comma favorite labeled "work" (Addendum 158). */
     private fun buildWorkAction(): Action = Action.Builder()
         .setIcon(workIcon)
         .setTitle("Work")
         .setOnClickListener {
-            val currentOffice = Bookmarks.getOffice(carContext)
+            val currentOffice = NavStateManager.commaWork
             if (currentOffice != null) {
                 startRoute(currentOffice)
             } else {

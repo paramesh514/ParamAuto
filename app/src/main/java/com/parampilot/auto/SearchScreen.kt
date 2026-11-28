@@ -26,7 +26,9 @@ import kotlin.math.sqrt
  *   network call and no loading spinner. Misses go to Mapbox SearchBox with
  *   the Photon fallback, and successful results are written to the cache.
  * - With an empty query, the screen opens on Home / Work shortcuts and the
- *   locally stored most-visited destinations — all zero-network.
+ *   comma's own favorites and recents (from the latest nav snapshot) —
+ *   all zero-network. Saved places live on the comma (Addendum 158);
+ *   the phone keeps no places memory of its own.
  */
 class SearchScreen(
     carContext: CarContext,
@@ -118,10 +120,12 @@ class SearchScreen(
         }
         searchResults.clear()
         if (searchText.length >= 2) {
-            val starredMatches = Bookmarks.getStarred(carContext).filter {
-                it.name.contains(searchText, ignoreCase = true) || it.placeName.contains(searchText, ignoreCase = true)
-            }
-            searchResults.addAll(starredMatches)
+            // Instant local rows are the comma's own places
+            // (Addendum 158): favorites + recents, text-matched.
+            val localMatches = CommaPlaces.matches(
+                NavStateManager.commaFavorites + NavStateManager.commaRecents, searchText
+            )
+            searchResults.addAll(localMatches)
             val cached = SearchCache.filterCached(carContext, searchText).let { list ->
                 if (NavStateManager.usePhoneSearch) list else list.filter { it.source == "comma" }
             }
@@ -209,10 +213,13 @@ class SearchScreen(
         Thread {
             val token = client.mapboxToken ?: NavStateManager.mapboxToken
                 ?: carContext.getSharedPreferences("comma_client", android.content.Context.MODE_PRIVATE).getString("mapbox_token", null)
-            val fallbackHome = Bookmarks.getHome(carContext) ?: Bookmarks.defaultFallbackHome
+            // Proximity anchor when there is no GPS: the comma's
+            // Home coordinates when it has one labeled, else the
+            // Phoenix anchor the old phone-side fallback used.
+            val anchor = NavStateManager.commaHome
             val gps = NavStateManager.currentGps
-            val lat = gps?.latitude ?: fallbackHome.latitude
-            val lng = gps?.longitude ?: fallbackHome.longitude
+            val lat = gps?.latitude ?: anchor?.latitude ?: 33.4484
+            val lng = gps?.longitude ?: anchor?.longitude ?: -112.0740
 
             var source = "photon"
             val commaEndpoint = client.commaIp ?: NavStateManager.commaIp
@@ -243,7 +250,6 @@ class SearchScreen(
                 for (d in results) {
                     if (d.hasCoordinates) {
                         SearchCache.putResolved(carContext, d)
-                        DestinationHistory.record(carContext, d)
                     }
                 }
             }
@@ -379,7 +385,6 @@ class SearchScreen(
                         NavStateManager.queuedDestination = null
                         NavStateManager.queuedOutOfSync = false
                     }
-                    DestinationHistory.record(carContext, resolved)
                     NavStateManager.activeDestination = resolved
                     NavStateManager.setNavClearedByUser(false)
                     NavStateManager.activeTurnCue = "Head toward ${resolved.name}"
@@ -576,14 +581,16 @@ class SearchScreen(
             // "search is broken".
             listBuilder.addItem(searchingRow())
         } else if (searchQuery.isEmpty() && !isLoading) {
-            // Search home: shortcuts first, then most visited — all local.
-            // Home/Work come from the canonical Bookmarks definitions; the
-            // subtitle is a real haversine distance from the current GPS
-            // (with a clearly-marked "~" ETA estimate), never a canned value.
-            val isHomeConfigured = Bookmarks.isHomeConfigured(carContext)
-            val homeDest = Bookmarks.getHome(carContext)
-            val isOfficeConfigured = Bookmarks.isOfficeConfigured(carContext)
-            val officeDest = Bookmarks.getOffice(carContext)
+            // Search home: shortcuts first, then the comma's saved
+            // places and recents — all from the latest snapshot.
+            // Home/Work are the comma favorites labeled "home"/"work"
+            // (Addendum 158); the subtitle is a real haversine
+            // distance from the current GPS (with a clearly-marked
+            // "~" ETA estimate), never a canned value.
+            val homeDest = NavStateManager.commaHome
+            val isHomeConfigured = homeDest != null
+            val officeDest = NavStateManager.commaWork
+            val isOfficeConfigured = officeDest != null
             val shortcutGps = NavStateManager.currentGps
 
             // Home Row
@@ -648,10 +655,11 @@ class SearchScreen(
                     .build()
             )
 
-            // Saved / Starred Places
-            val starred = Bookmarks.getStarred(carContext)
-            if (starred.isNotEmpty()) {
-                for (dest in starred.take(4)) {
+            // Saved places: the comma's favorites without a Home/Work
+            // label (the labeled ones are the shortcut rows above).
+            val saved = NavStateManager.commaFavorites.filter { it.commaLabel == null }
+            if (saved.isNotEmpty()) {
+                for (dest in saved.take(4)) {
                     listBuilder.addItem(
                         Row.Builder()
                             .setTitle(dest.name)
@@ -665,48 +673,19 @@ class SearchScreen(
                 }
             }
 
-            // The comma's own places (Feature 8): favorites and recents
-            val commaFavorites = NavStateManager.commaFavorites
+            // The comma's recent destinations, deduplicated against
+            // its favorites (shown above in their own sections).
             val commaRecents = NavStateManager.commaRecents.filter { r ->
-                commaFavorites.none { it.isSameAs(r) }
+                NavStateManager.commaFavorites.none { it.isSameAs(r) }
             }
-            val commaPlaces = (commaFavorites + commaRecents).filter { r ->
-                val matchesHome = isHomeConfigured && homeDest != null && (r.isSameAs(homeDest) || r.name.equals("Home", ignoreCase = true))
-                val matchesWork = isOfficeConfigured && officeDest != null && (r.isSameAs(officeDest) || r.name.equals("Office", ignoreCase = true) || r.name.equals("Work", ignoreCase = true))
-                val matchesStarred = starred.any { it.isSameAs(r) }
-                !matchesHome && !matchesWork && !matchesStarred
-            }
-            if (commaPlaces.isNotEmpty()) {
-                for (dest in commaPlaces.take(3)) {
+            if (commaRecents.isNotEmpty()) {
+                for (dest in commaRecents.take(3)) {
                     listBuilder.addItem(
                         Row.Builder()
                             .setTitle(dest.name)
                             .apply {
                                 val sub = dest.placeName.takeIf { it.isNotEmpty() && it != dest.name } ?: "From comma"
                                 addText(sub)
-                            }
-                            .setOnClickListener { onDestinationSelected(dest) }
-                            .build()
-                    )
-                }
-            }
-
-            // Recent destinations (deduplicated against Home, Work, Starred, and comma places)
-            val recent = DestinationHistory.recent(carContext, 6).filter { r ->
-                val matchesHome = isHomeConfigured && homeDest != null && (r.isSameAs(homeDest) || r.name.equals("Home", ignoreCase = true))
-                val matchesWork = isOfficeConfigured && officeDest != null && (r.isSameAs(officeDest) || r.name.equals("Office", ignoreCase = true) || r.name.equals("Work", ignoreCase = true))
-                val matchesStarred = starred.any { it.isSameAs(r) }
-                val matchesComma = commaPlaces.any { it.isSameAs(r) }
-                !matchesHome && !matchesWork && !matchesStarred && !matchesComma
-            }.take(3)
-            if (recent.isNotEmpty()) {
-                for (dest in recent) {
-                    listBuilder.addItem(
-                        Row.Builder()
-                            .setTitle(dest.name)
-                            .apply {
-                                val sub = dest.placeName.takeIf { it.isNotEmpty() && it != dest.name }
-                                if (sub != null) addText(sub)
                             }
                             .setOnClickListener { onDestinationSelected(dest) }
                             .build()

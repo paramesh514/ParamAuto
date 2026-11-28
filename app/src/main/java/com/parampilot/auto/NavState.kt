@@ -60,6 +60,16 @@ data class NavDestination(
     val sessionToken: String? = null,
     val distanceM: Double? = null,
     val source: String = "",
+    /** The comma's own place id (Addendum 158): set only on rows parsed
+     *  from the comma's favorites/recents lists ([CommaPlaces]); it is
+     *  the handle the removeFavorite / removeRecent / labelFavorite
+     *  actions address. */
+    val commaId: String? = null,
+    /** The comma's favorite label (Addendum 158): "home" or "work" on
+     *  a labeled comma favorite, null on every other place. Home and
+     *  Work ARE comma favorites with this label — there is no separate
+     *  phone-side store for them anymore. */
+    val commaLabel: String? = null,
 ) {
     val hasCoordinates: Boolean get() = latitude != 0.0 && longitude != 0.0
 

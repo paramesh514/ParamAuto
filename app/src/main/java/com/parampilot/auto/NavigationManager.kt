@@ -778,7 +778,6 @@ class NavigationManager {
                         SearchCache.put(ctx, trimmed, results)
                         results.filter { it.hasCoordinates }.forEach {
                             SearchCache.putResolved(ctx, it)
-                            DestinationHistory.record(ctx, it)
                         }
                     }
                 }
@@ -1277,6 +1276,145 @@ class NavigationManager {
         return code == 200
     }
 
+    // ------------------------------------------------------------------------
+    // Saved places on the comma (Addendum 158): favorites / recents /
+    // Home / Work live on the device — the phone keeps no copy. Bodies
+    // are built by [CommaPlaceActions]; each answer is a status
+    // snapshot, applied like every other action's, so the shared
+    // comma lists refresh from the comma's own response.
+    // ------------------------------------------------------------------------
+
+    /**
+     * Saves [dest] as a comma favorite, optionally labeled "home" /
+     * "work". A temporary comma search suggestion (no coordinates of
+     * its own) goes through favoritePlace — the comma retrieves the
+     * place itself — and, exactly like selectPlace, must present the
+     * search-time revision; the server keeps the search entry alive
+     * and rebinds it to the save's new revision, which is recorded
+     * here so a later selectPlace for the same suggestion still
+     * matches. Any other place goes through favorite with its
+     * coordinates. On failure [lastSendError] carries the comma's
+     * own error text where it sent one.
+     */
+    fun favoriteCommaPlaceSg(
+        baseUrl: String,
+        dest: NavDestination,
+        label: String? = null
+    ): Boolean {
+        val client = SgGalaxyClient(baseUrl)
+        val placeId = dest.mapboxId
+        val searchId = dest.sessionToken
+        val isSuggestion = dest.source == "comma" && !dest.hasCoordinates &&
+            !placeId.isNullOrEmpty() && !searchId.isNullOrEmpty()
+        val (code, resp) = when {
+            isSuggestion -> postNavActionWithRetry(
+                client, commaSearchRevision ?: NavStateManager.sgRevision
+            ) { rev -> CommaPlaceActions.favoritePlace(placeId!!, searchId!!, rev, label) }
+            dest.hasCoordinates -> postNavActionWithRetry(
+                client, NavStateManager.sgRevision
+            ) { rev -> CommaPlaceActions.favorite(dest, rev, label) }
+            else -> {
+                lastSendError = "This place has no coordinates to save"
+                return false
+            }
+        }
+        lastSendCode = code
+        if (resp != null) applySgSnapshot(resp)
+        if (code != 200) {
+            lastSendError = resp?.optString("error", "")?.ifEmpty { null }
+                ?: if (code == 401) {
+                    "comma refused the request (HTTP 401) — Galaxy sign-in/password needed for this connection"
+                } else {
+                    "comma answered HTTP $code"
+                }
+            Log.w(TAG, "SG favorite save to $baseUrl failed, code: $code")
+            return false
+        }
+        if (isSuggestion && resp != null) {
+            // The save rebound the search entry server-side to the
+            // new revision; keep the recorded search revision in step.
+            SgSnapshot.revisionOf(resp)?.let { commaSearchRevision = it }
+        }
+        lastSendError = null
+        Log.i(TAG, "SG favorite saved to $baseUrl: ${dest.name}")
+        return true
+    }
+
+    /** Removes a saved favorite: {"action":"removeFavorite", "id", ...}. */
+    fun removeCommaFavoriteSg(baseUrl: String, favorite: NavDestination): Boolean =
+        commaPlaceActionSg(baseUrl, "removeFavorite", favorite.commaId) { rev, id ->
+            CommaPlaceActions.removeFavorite(id, rev)
+        }
+
+    /**
+     * Sets or clears a favorite's Home/Work label:
+     * {"action":"labelFavorite", "id", "label", ...}. A null [label]
+     * clears it; the server keeps at most one favorite per label.
+     */
+    fun labelCommaFavoriteSg(
+        baseUrl: String,
+        favorite: NavDestination,
+        label: String?
+    ): Boolean {
+        val id = favorite.commaId
+        if (id.isNullOrEmpty()) {
+            lastSendError = "This place is not saved on the comma"
+            return false
+        }
+        val (code, resp) = postNavActionWithRetry(
+            SgGalaxyClient(baseUrl), NavStateManager.sgRevision
+        ) { rev -> CommaPlaceActions.labelFavorite(id, label, rev) }
+        return finishCommaPlaceAction("labelFavorite", code, resp)
+    }
+
+    /** Removes one recent: {"action":"removeRecent", "id", ...}. */
+    fun removeCommaRecentSg(baseUrl: String, recent: NavDestination): Boolean =
+        commaPlaceActionSg(baseUrl, "removeRecent", recent.commaId) { rev, id ->
+            CommaPlaceActions.removeRecent(id, rev)
+        }
+
+    /** Clears the comma's recents list: {"action":"clearRecents", ...}. */
+    fun clearCommaRecentsSg(baseUrl: String): Boolean {
+        val (code, resp) = postNavActionWithRetry(
+            SgGalaxyClient(baseUrl), NavStateManager.sgRevision
+        ) { rev -> CommaPlaceActions.clearRecents(rev) }
+        return finishCommaPlaceAction("clearRecents", code, resp)
+    }
+
+    /** Shared tail for the id-addressed saved-place actions. */
+    private fun commaPlaceActionSg(
+        baseUrl: String,
+        action: String,
+        commaId: String?,
+        buildBody: (String, String) -> JSONObject
+    ): Boolean {
+        if (commaId.isNullOrEmpty()) {
+            lastSendError = "This place is not saved on the comma"
+            return false
+        }
+        val (code, resp) = postNavActionWithRetry(
+            SgGalaxyClient(baseUrl), NavStateManager.sgRevision
+        ) { rev -> buildBody(rev, commaId) }
+        return finishCommaPlaceAction(action, code, resp)
+    }
+
+    private fun finishCommaPlaceAction(
+        action: String,
+        code: Int,
+        resp: JSONObject?
+    ): Boolean {
+        lastSendCode = code
+        if (resp != null) applySgSnapshot(resp)
+        if (code != 200) {
+            lastSendError = resp?.optString("error", "")?.ifEmpty { null }
+                ?: "comma answered HTTP $code"
+            Log.w(TAG, "SG $action failed, code: $code")
+            return false
+        }
+        lastSendError = null
+        return true
+    }
+
     /**
      * Chooses a temporary comma search suggestion:
      * {"action":"selectPlace", "id", "searchId", ...}. The comma retrieves
@@ -1371,7 +1509,6 @@ class NavigationManager {
                 dest.mapboxId?.let { id ->
                     SearchCache.putResolved(ctx, confirmed.copy(mapboxId = id))
                 }
-                DestinationHistory.record(ctx, confirmed)
             }
         } else {
             lastConfirmedDest = dest
@@ -1564,7 +1701,6 @@ class NavigationManager {
         }
         NavStateManager.appContext?.let { ctx ->
             SearchCache.putResolved(ctx, newDest)
-            DestinationHistory.record(ctx, newDest)
         }
         val wasCleared = NavStateManager.navClearedByUser &&
             (NavStateManager.clearedDestination?.isSameAs(newDest) == true ||
