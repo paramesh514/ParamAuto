@@ -3664,10 +3664,11 @@ class SettingsDialogs(private val activity: Activity) {
     }
 
     /**
-     * Comma settings — the page list (Param, 2026-11-20): the Galaxy
-     * settings pages he named, grouped the way the app's Settings
-     * menu groups everything else. Each entry opens its page as a
-     * native editor ([showSettingsPageDialog]).
+     * Comma settings — the section list (Param, 2026-11-20): the
+     * Galaxy settings pages, grouped the way the app's Settings
+     * menu groups everything else. Each section opens as ONE
+     * combined visual scene over all its pages (Addendum 152);
+     * a one-page section opens that page's visual editor.
      */
     fun showCommaSettingsListDialog(client: CommaClient?, onUpdated: () -> Unit) {
         val (dialog, body, pal) = createM3Dialog(
@@ -3686,22 +3687,21 @@ class SettingsDialogs(private val activity: Activity) {
         for ((section, entries) in GalaxySettings.SECTIONS) {
             body.addView(createSectionHeader(section, pal))
             val card = createGroupCard(pal)
-            entries.forEachIndexed { i, entry ->
-                if (i > 0) card.addView(createDivider(pal))
-                card.addView(
-                    createSettingsRow(
-                        iconKind = SettingsIconView.Kind.TUNE,
-                        title = entry.title,
-                        subtitle = entry.blurb,
-                        pal = pal
-                    ) {
-                        dialog.dismiss()
-                        showVisualSettingsPageDialog(
-                            client, entry.id, entry.title, onUpdated
-                        )
-                    }
-                )
-            }
+            val only = entries.singleOrNull()
+            card.addView(
+                createSettingsRow(
+                    iconKind = SettingsIconView.Kind.TUNE,
+                    title = only?.title ?: "All in one scene",
+                    subtitle = only?.blurb
+                        ?: entries.joinToString(" · ") { it.title },
+                    pal = pal
+                ) {
+                    dialog.dismiss()
+                    showVisualSettingsSectionDialog(
+                        client, section, entries, onUpdated
+                    )
+                }
+            )
             body.addView(card)
         }
         dialog.show()
@@ -4408,15 +4408,66 @@ class SettingsDialogs(private val activity: Activity) {
         fallbackTitle: String,
         onUpdated: () -> Unit
     ) {
+        val entry = GalaxySettings.PageEntry(pageId, fallbackTitle, "")
+        showVisualSettingsCombinedDialog(
+            client, listOf(entry), fallbackTitle,
+            classicEntry = entry, onUpdated = onUpdated
+        )
+    }
+
+    /**
+     * A whole settings SECTION as ONE combined visual scene
+     * (Addendum 152, Param 2026-11-27: "Instead of one image per
+     * setting. Combined multiple settings into images"). The
+     * section's pages share a single dialog and a single road
+     * scene drawn from the union of all their rows; the cards stay
+     * grouped under a subhead per page, and each card still saves
+     * through its own page's preview + confirm. A one-page section
+     * behaves exactly like that page's own visual dialog, Classic
+     * view footer included.
+     */
+    fun showVisualSettingsSectionDialog(
+        client: CommaClient?,
+        section: String,
+        entries: List<GalaxySettings.PageEntry>,
+        onUpdated: () -> Unit
+    ) {
+        val title = section.split(" ").joinToString(" ") { word ->
+            word.lowercase().replaceFirstChar { c -> c.uppercaseChar() }
+        }
+        showVisualSettingsCombinedDialog(
+            client, entries, title,
+            classicEntry = entries.singleOrNull(),
+            onUpdated = onUpdated
+        )
+    }
+
+    /**
+     * The combined visual editor behind both entry points above:
+     * one [RoadSceneView] over the union of [entries]' rows, the
+     * pages' cards grouped under per-page subheads, and per-page
+     * preview + confirm plumbing inside one Galaxy session.
+     * [classicEntry], when given, adds the "Classic view" footer
+     * reopening that page's row editor; a multi-page section has
+     * no single classic editor, so it gets no footer.
+     */
+    private fun showVisualSettingsCombinedDialog(
+        client: CommaClient?,
+        entries: List<GalaxySettings.PageEntry>,
+        dialogTitle: String,
+        classicEntry: GalaxySettings.PageEntry?,
+        onUpdated: () -> Unit
+    ) {
         val (dialog, body, pal) = createM3Dialog(
-            fallbackTitle,
+            dialogTitle,
             "Visual settings — saved on the comma"
         )
         val baseUrl = SgGalaxyClient.baseUrlFor(
             client?.getEffectiveNavigationEndpoint() ?: "192.168.68.9"
         )
         val sgClient = SgGalaxyClient(baseUrl)
-        var currentPage: GalaxySettings.Page? = null
+        val pages = LinkedHashMap<String, GalaxySettings.Page>()
+        val loadErrors = HashMap<String, String>()
 
         val statusLine = TextView(activity).apply {
             dpText(13f)
@@ -4435,17 +4486,22 @@ class SettingsDialogs(private val activity: Activity) {
             orientation = LinearLayout.VERTICAL
         }
         body.addView(content)
-        body.addView(TextView(activity).apply {
-            text = "Classic view"
-            dpText(13.5f)
-            setTextColor(pal.accentBlue)
-            gravity = Gravity.CENTER
-            setPadding(dp(4), dp(14), dp(4), dp(2))
-            setOnClickListener {
-                dialog.dismiss()
-                showSettingsPageDialog(client, pageId, fallbackTitle, onUpdated)
-            }
-        })
+        if (classicEntry != null) {
+            body.addView(TextView(activity).apply {
+                text = "Classic view"
+                dpText(13.5f)
+                setTextColor(pal.accentBlue)
+                gravity = Gravity.CENTER
+                setPadding(dp(4), dp(14), dp(4), dp(2))
+                setOnClickListener {
+                    dialog.dismiss()
+                    showSettingsPageDialog(
+                        client, classicEntry.id, classicEntry.title,
+                        onUpdated
+                    )
+                }
+            })
+        }
 
         fun noteView(text: String): TextView = TextView(activity).apply {
             this.text = text
@@ -4467,9 +4523,9 @@ class SettingsDialogs(private val activity: Activity) {
             }
         }
 
-        lateinit var render: (GalaxySettings.Page) -> Unit
+        lateinit var render: () -> Unit
 
-        fun refresh(clearStatus: Boolean) {
+        fun refresh(pageId: String, clearStatus: Boolean) {
             Thread {
                 val (code, resp) = sgClient.fetchSettingsPage(pageId)
                 val page = GalaxySettings.parsePage(resp)
@@ -4477,21 +4533,44 @@ class SettingsDialogs(private val activity: Activity) {
                     if (!dialog.isShowing) return@runOnUiThread
                     if (code == 200 && page != null) {
                         if (clearStatus) statusLine.text = ""
-                        render(page)
-                    } else if (currentPage == null) {
-                        content.removeAllViews()
-                        content.addView(
-                            noteView(
-                                "Couldn't load this page from the comma. " +
-                                    errorText(resp, code)
-                            )
-                        )
+                        pages[pageId] = page
+                        loadErrors.remove(pageId)
+                        render()
+                    } else if (!pages.containsKey(pageId)) {
+                        loadErrors[pageId] = errorText(resp, code)
+                        render()
                     }
                 }
             }.start()
         }
 
-        fun confirmIntent(intent: String) {
+        /** First load: every page of the section, fetched one
+         *  after another on a single thread so they all share the
+         *  one Galaxy session. A page that fails keeps a visible
+         *  error note under its subhead while the others render. */
+        fun loadAll() {
+            Thread {
+                val loaded = LinkedHashMap<String, GalaxySettings.Page>()
+                val failed = HashMap<String, String>()
+                for (entry in entries) {
+                    val (code, resp) = sgClient.fetchSettingsPage(entry.id)
+                    val page = GalaxySettings.parsePage(resp)
+                    if (code == 200 && page != null) {
+                        loaded[entry.id] = page
+                    } else {
+                        failed[entry.id] = errorText(resp, code)
+                    }
+                }
+                activity.runOnUiThread {
+                    if (!dialog.isShowing) return@runOnUiThread
+                    pages.putAll(loaded)
+                    loadErrors.putAll(failed)
+                    render()
+                }
+            }.start()
+        }
+
+        fun confirmIntent(pageId: String, intent: String) {
             statusLine.text = "Saving…"
             Thread {
                 val (code, resp) = sgClient.postSettingsConfirm(
@@ -4512,32 +4591,34 @@ class SettingsDialogs(private val activity: Activity) {
                             resp.optJSONObject("page")
                         )
                         if (fresh != null) {
-                            render(fresh)
+                            pages[pageId] = fresh
+                            render()
                         } else {
-                            refresh(clearStatus = true)
+                            refresh(pageId, clearStatus = true)
                         }
                     } else {
                         statusLine.text = errorText(resp, code)
                         if (code == 409) {
-                            refresh(clearStatus = false)
+                            refresh(pageId, clearStatus = false)
                         } else {
-                            currentPage?.let { render(it) }
+                            render()
                         }
                     }
                 }
             }.start()
         }
 
-        fun previewFailed(resp: JSONObject?, code: Int) {
+        fun previewFailed(pageId: String, resp: JSONObject?, code: Int) {
             statusLine.text = errorText(resp, code)
             if (code == 409) {
-                refresh(clearStatus = false)
+                refresh(pageId, clearStatus = false)
             } else {
-                currentPage?.let { render(it) }
+                render()
             }
         }
 
         fun askQuestion(
+            pageId: String,
             rowLabel: String,
             question: String?,
             intent: String
@@ -4546,13 +4627,13 @@ class SettingsDialogs(private val activity: Activity) {
                 title = rowLabel,
                 message = question?.ifEmpty { null } ?: "Apply this change?",
                 positiveLabel = "Confirm",
-                onNegative = { currentPage?.let { render(it) } },
-                onPositive = { confirmIntent(intent) }
+                onNegative = { render() },
+                onPositive = { confirmIntent(pageId, intent) }
             )
         }
 
-        fun commitValue(index: Int, value: Any) {
-            val page = currentPage ?: return
+        fun commitValue(pageId: String, index: Int, value: Any) {
+            val page = pages[pageId] ?: return
             statusLine.text = "Saving…"
             Thread {
                 val (code, resp) = sgClient.postSettingsPreview(
@@ -4562,16 +4643,16 @@ class SettingsDialogs(private val activity: Activity) {
                 activity.runOnUiThread {
                     if (!dialog.isShowing) return@runOnUiThread
                     if (code == 200 && intent != null) {
-                        confirmIntent(intent)
+                        confirmIntent(pageId, intent)
                     } else {
-                        previewFailed(resp, code)
+                        previewFailed(pageId, resp, code)
                     }
                 }
             }.start()
         }
 
-        fun reviewAction(index: Int, row: GalaxySettings.Row) {
-            val page = currentPage ?: return
+        fun reviewAction(pageId: String, index: Int, row: GalaxySettings.Row) {
+            val page = pages[pageId] ?: return
             statusLine.text = "Asking the comma…"
             Thread {
                 val (code, resp) = sgClient.postSettingsPreview(
@@ -4585,16 +4666,16 @@ class SettingsDialogs(private val activity: Activity) {
                     if (!dialog.isShowing) return@runOnUiThread
                     if (code == 200 && intent != null) {
                         statusLine.text = ""
-                        askQuestion(row.label, question, intent)
+                        askQuestion(pageId, row.label, question, intent)
                     } else {
-                        previewFailed(resp, code)
+                        previewFailed(pageId, resp, code)
                     }
                 }
             }.start()
         }
 
-        fun resetDefault(index: Int, row: GalaxySettings.Row) {
-            val page = currentPage ?: return
+        fun resetDefault(pageId: String, index: Int, row: GalaxySettings.Row) {
+            val page = pages[pageId] ?: return
             statusLine.text = "Asking the comma…"
             Thread {
                 val (code, resp) = sgClient.postSettingsResetDefault(
@@ -4607,26 +4688,42 @@ class SettingsDialogs(private val activity: Activity) {
                     if (code == 200 && intent != null) {
                         statusLine.text = ""
                         askQuestion(
-                            "Reset ${row.label}", question, intent
+                            pageId, "Reset ${row.label}", question, intent
                         )
                     } else {
-                        previewFailed(resp, code)
+                        previewFailed(pageId, resp, code)
                     }
                 }
             }.start()
         }
 
+        /** The presented rows of every loaded page, in section
+         *  order — the union the one combined scene is drawn from
+         *  (Addendum 152). */
+        fun combinedRows(): List<GalaxySettings.Row> =
+            entries.flatMap { entry ->
+                pages[entry.id]?.rows?.map {
+                    GalaxySettings.presented(it)
+                } ?: emptyList()
+            }
+
         /** Recompute the scene with one row's value swapped in, so
          *  the road reacts the moment a control is touched — before
          *  the comma's confirm comes back. */
-        fun previewScene(changedIndex: Int, newValue: String) {
-            val page = currentPage ?: return
-            val presentedRows = page.rows.mapIndexed { i, r ->
-                val presented = GalaxySettings.presented(r)
-                if (i == changedIndex) presented.copy(value = newValue)
-                else presented
+        fun previewScene(pageId: String, changedIndex: Int, newValue: String) {
+            val rows = entries.flatMap { entry ->
+                val page = pages[entry.id]
+                    ?: return@flatMap emptyList<GalaxySettings.Row>()
+                page.rows.mapIndexed { i, r ->
+                    val presented = GalaxySettings.presented(r)
+                    if (entry.id == pageId && i == changedIndex) {
+                        presented.copy(value = newValue)
+                    } else {
+                        presented
+                    }
+                }
             }
-            sceneView.update(SettingsScene.from(presentedRows))
+            sceneView.update(SettingsScene.from(rows))
         }
 
         fun cardShell(): LinearLayout = createGroupCard(pal).apply {
@@ -4655,14 +4752,20 @@ class SettingsDialogs(private val activity: Activity) {
                 setPadding(dp(16), dp(2), dp(16), 0)
             }
 
-        render = { page ->
-            currentPage = page
-            sceneView.update(
-                SettingsScene.from(
-                    page.rows.map { GalaxySettings.presented(it) }
-                )
-            )
-            content.removeAllViews()
+        /** One page's cards, rendered into the shared content
+         *  column under its subhead. The two-argument helpers below
+         *  bind this page's id, so the card code itself is the
+         *  single-page editor's, unchanged — every save still goes
+         *  through this page's own view, preview and confirm. */
+        fun renderPageCards(pageId: String, page: GalaxySettings.Page) {
+            fun commitValue(index: Int, value: Any) =
+                commitValue(pageId, index, value)
+            fun previewScene(index: Int, newValue: String) =
+                previewScene(pageId, index, newValue)
+            fun reviewAction(index: Int, row: GalaxySettings.Row) =
+                reviewAction(pageId, index, row)
+            fun resetDefault(index: Int, row: GalaxySettings.Row) =
+                resetDefault(pageId, index, row)
             if (page.subtitle.isNotEmpty()) {
                 content.addView(noteView(page.subtitle))
             }
@@ -5206,8 +5309,32 @@ class SettingsDialogs(private val activity: Activity) {
             }
         }
 
+        render = {
+            sceneView.update(SettingsScene.from(combinedRows()))
+            content.removeAllViews()
+            val combined = entries.size > 1
+            for (entry in entries) {
+                if (combined) {
+                    content.addView(createSectionHeader(entry.title, pal))
+                }
+                val loaded = pages[entry.id]
+                if (loaded == null) {
+                    content.addView(
+                        noteView(
+                            loadErrors[entry.id]?.let { err ->
+                                "Couldn't load this page from the " +
+                                    "comma. " + err
+                            } ?: "Loading settings…"
+                        )
+                    )
+                } else {
+                    renderPageCards(entry.id, loaded)
+                }
+            }
+        }
+
         content.addView(noteView("Loading settings…"))
-        refresh(clearStatus = true)
+        loadAll()
         dialog.show()
     }
 
