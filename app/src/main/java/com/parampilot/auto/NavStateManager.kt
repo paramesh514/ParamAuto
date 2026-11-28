@@ -29,16 +29,111 @@ object NavStateManager {
     @Volatile
     var destinationSelectedAtMs: Long = 0L
 
+    /**
+     * How long a selected destination counts as "pending" after the
+     * last send activity (Addendum 155: widened from 15 s — the
+     * timestamp is refreshed by selection, by every successful send
+     * and by every offline-queue flush attempt, so the window
+     * measures time since the last try, not since the tap; the
+     * validated flicker had sends failing for ~6 minutes).
+     */
+    const val DESTINATION_PENDING_GRACE_MS = 60_000L
+
     fun isDestinationPendingGrace(): Boolean {
         val elapsed = System.currentTimeMillis() - destinationSelectedAtMs
-        return activeDestination != null && elapsed in 0..15_000L
+        return activeDestination != null && elapsed in 0..DESTINATION_PENDING_GRACE_MS
     }
+
+    /**
+     * True once a snapshot (or a telemetry packet built from one)
+     * has carried the current [activeDestination] — the comma
+     * provably registered it (Addendum 155). Reset whenever a new
+     * destination is selected and whenever the destination clears.
+     */
+    @Volatile
+    var destinationSnapshotConfirmed: Boolean = false
+
+    /**
+     * Bare destination-less snapshot observations in a row since
+     * the last observation that carried a destination (Addendum
+     * 155 hysteresis; see [DestinationClearGuard]).
+     */
+    @Volatile
+    var consecutiveEmptyDestinationSnapshots: Int = 0
 
     fun markDestinationSelected(dest: NavDestination) {
         activeDestination = dest
         destinationSelectedAtMs = System.currentTimeMillis()
+        destinationSnapshotConfirmed = false
+        consecutiveEmptyDestinationSnapshots = 0
         navClearedByUser = false
         clearedDestination = null
+    }
+
+    /**
+     * A snapshot carried the current destination: the comma has
+     * registered it. Marks the destination snapshot-confirmed and
+     * breaks any run of bare destination-less observations.
+     */
+    fun noteDestinationConfirmedBySnapshot() {
+        destinationSnapshotConfirmed = true
+        consecutiveEmptyDestinationSnapshots = 0
+    }
+
+    /**
+     * Send activity for [dest] — a successful send or an offline
+     * queue flush attempt (Addendum 155): refreshes the pending
+     * timestamp so the grace window runs from the last send effort.
+     * Only the displayed or queued destination's own activity
+     * counts; a send for some other place must not extend this
+     * destination's window.
+     */
+    fun refreshDestinationPending(dest: NavDestination) {
+        if (activeDestination?.isSameAs(dest) == true ||
+            queuedDestination?.isSameAs(dest) == true
+        ) {
+            destinationSelectedAtMs = System.currentTimeMillis()
+        }
+    }
+
+    /** The displayed destination is the one waiting in the offline queue. */
+    fun isActiveDestinationQueued(): Boolean {
+        val active = activeDestination ?: return false
+        return queuedDestination?.isSameAs(active) == true
+    }
+
+    /**
+     * THE destination-clear decision (Addendum 155), shared by
+     * every snapshot writer so the paths cannot drift: CommaClient's
+     * poll publish, NavigationManager's snapshot application and
+     * MainActivity's telemetry-packet handler all ask here whether
+     * an observation that carries no destination may clear the
+     * displayed destination. [explicitEnded] is the observation's
+     * own ended status ([SgSnapshot.ENDED_STATUSES]); a bare
+     * destination-less observation passes false.
+     *
+     * Side effects: a bare observation against a displayed
+     * destination extends the consecutive-empty run; a CLEAR
+     * verdict resets the confirmation state (the destination is
+     * about to be cleared by the caller).
+     */
+    fun evaluateDestinationEnd(explicitEnded: Boolean): DestinationClearGuard.Decision {
+        if (!explicitEnded && activeDestination != null) {
+            consecutiveEmptyDestinationSnapshots++
+        }
+        val decision = DestinationClearGuard.decide(
+            hasActiveDestination = activeDestination != null,
+            confirmedBySnapshot = destinationSnapshotConfirmed,
+            isQueued = isActiveDestinationQueued(),
+            explicitEnded = explicitEnded,
+            consecutiveEmptySnapshots = consecutiveEmptyDestinationSnapshots,
+            inPendingGrace = isDestinationPendingGrace()
+        )
+        if (decision == DestinationClearGuard.Decision.CLEAR) {
+            destinationSnapshotConfirmed = false
+            consecutiveEmptyDestinationSnapshots = 0
+        }
+        return decision
     }
 
     // ---- Trip tracking for the arrival card (Feature 2) ----
@@ -740,6 +835,14 @@ object NavStateManager {
             // A destination the app accepts supersedes any end state.
             noteNewDestination()
         }
+        // Addendum 155: a packet carrying the displayed destination
+        // is a snapshot confirmation (the SG packet is built from
+        // the same status payload) — it marks the destination
+        // confirmed and breaks any bare-empty run.
+        if (pkt.destination != null && !navClearedByUser &&
+            activeDestination?.isSameAs(pkt.destination) == true) {
+            noteDestinationConfirmedBySnapshot()
+        }
         // End Route confidence (backlog #3): the comma still publishing
         // the destination the user ended — after the grace window — means
         // the clear didn't stick, and the header must say so. Adoption
@@ -886,6 +989,8 @@ object NavStateManager {
     fun clear() {
         clearedDestination = activeDestination
         destinationSelectedAtMs = 0L
+        destinationSnapshotConfirmed = false
+        consecutiveEmptyDestinationSnapshots = 0
         navClearedByUser = true
         activeDestination = null
         activeRoutes = emptyList()

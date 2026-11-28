@@ -1141,6 +1141,10 @@ class NavigationManager {
         lastConfirmedDest = dest
         lastConfirmedTarget = baseUrl
         lastConfirmedAtMs = System.currentTimeMillis()
+        // Addendum 155: a successful send refreshes the pending
+        // grace — the comma may still need time to publish the
+        // destination in its status snapshots.
+        NavStateManager.refreshDestinationPending(dest)
         NavStateManager.markTripStarted(dest)
         lastSendError = null
         lastSentDest = dest
@@ -1375,6 +1379,8 @@ class NavigationManager {
             lastConfirmedAtMs = System.currentTimeMillis()
             NavStateManager.markTripStarted(dest)
         }
+        // Addendum 155: a successful send refreshes the pending grace.
+        NavStateManager.refreshDestinationPending(dest)
         lastSendError = null
         Log.i(TAG, "SG selectPlace sent to $baseUrl: ${dest.name}")
         return true
@@ -1571,15 +1577,29 @@ class NavigationManager {
                 NavStateManager.noteNewDestination()
             }
         }
+        // Addendum 155: the snapshot carried the destination now
+        // displayed — the comma has registered it.
+        if (NavStateManager.activeDestination?.isSameAs(newDest) == true) {
+            NavStateManager.noteDestinationConfirmedBySnapshot()
+        }
     }
 
     /**
      * applySgSnapshotInternal, route-ended branch (extracted
      * 2026-11-08): device-confirmed end + arrival + clearing,
-     * outside the destination-pending grace only.
+     * gated by the centralized destination-clear guard
+     * (Addendum 155, [DestinationClearGuard]).
      */
     private fun applySnapshotRouteEnd(parsed: SgSnapshot.Parsed, statusStr: String) {
-        if (NavStateManager.isDestinationPendingGrace()) return
+        // Addendum 155: same centralized decision the poll writer
+        // makes — a bare destination-less snapshot keeps an
+        // unconfirmed or queued destination (and a confirmed one
+        // until 3 bare empties in a row); an explicit ended status
+        // clears immediately.
+        val explicitEnded = statusStr in SgSnapshot.ENDED_STATUSES
+        if (NavStateManager.evaluateDestinationEnd(explicitEnded) ==
+            DestinationClearGuard.Decision.KEEP
+        ) return
         // End Route confidence (backlog #3): the comma's own
         // snapshot now reports no destination — the end is
         // confirmed by the device, not just by the clear action's
