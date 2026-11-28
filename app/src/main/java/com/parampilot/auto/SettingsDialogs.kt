@@ -6641,6 +6641,18 @@ class SettingsDialogs(private val activity: Activity) {
                                         // re-installing forever.
                                         val unconfirmed =
                                             code == -1 || code == SgGalaxyClient.CODE_AMBIGUOUS
+                                        // Addendum 160: a refusal whose
+                                        // reason says the updater is busy
+                                        // / a request is pending means
+                                        // the install is already running
+                                        // server-side — record it so the
+                                        // engine waits on status instead
+                                        // of re-POSTing into refusals.
+                                        val reason = resp?.optString("error", "")
+                                            ?.ifEmpty { null }
+                                        val busyRefusal =
+                                            SoftwareUpdatePlan.classifyAttempt(code, reason) ==
+                                                SoftwareUpdatePlan.AttemptOutcome.BUSY_REFUSAL
                                         SoftwareUpdateIntentStore.save(
                                             activity,
                                             if (code in 200..299) {
@@ -6651,7 +6663,8 @@ class SettingsDialogs(private val activity: Activity) {
                                             } else {
                                                 newPending.copy(
                                                     lastAttemptMs = attemptAt,
-                                                    attemptUnconfirmed = unconfirmed
+                                                    attemptUnconfirmed = unconfirmed,
+                                                    serverBusy = busyRefusal
                                                 )
                                             }
                                         )

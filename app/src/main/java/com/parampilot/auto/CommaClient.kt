@@ -2416,6 +2416,9 @@ class CommaClient(private val context: Context) {
      * from the reboot cycle (accepted → heartbeat lost → heartbeat
      * back). The intent is persisted (SoftwareUpdateIntentStore), so
      * it survives app restarts; decisions are SoftwareUpdatePlan's.
+     * Addendum 160 adds status reconciliation on the attempt cadence
+     * (see attemptPendingSoftwareInstall) for the restarts this
+     * heartbeat path cannot observe.
      */
     private fun runPendingSoftwareInstall(client: SgGalaxyClient, deviceState: JSONObject?) {
         try {
@@ -2439,49 +2442,137 @@ class CommaClient(private val context: Context) {
                 ?.equals("parked", ignoreCase = true) == true
             val now = System.currentTimeMillis()
             when (SoftwareUpdatePlan.evaluate(pending, heartbeatUp, parked, now)) {
-                SoftwareUpdatePlan.Decision.ATTEMPT -> {
-                    val (code, _) = CommaSoftwareUpdate(client).postAction(
-                        "install", pending.branch.ifEmpty { null }
-                    )
-                    // Addendum 134: classify the outcome. A 2xx is an
-                    // acceptance. An HTTP error status is the comma
-                    // answering with a refusal — keep retrying. NO
-                    // answer at all (transport failure -1, or the BLE
-                    // ambiguous code) means the install may have
-                    // started and taken the comma down before the
-                    // response arrived: mark the attempt unconfirmed
-                    // and let the reboot cycle (or the no-reboot
-                    // window) complete it instead of retrying forever.
-                    val attempted = pending.copy(
-                        lastAttemptMs = now,
-                        acceptedAtMs = if (code in 200..299) now else pending.acceptedAtMs,
-                        attemptUnconfirmed = when {
-                            code in 200..299 -> false
-                            code == -1 || code == SgGalaxyClient.CODE_AMBIGUOUS -> true
-                            else -> false
-                        }
-                    )
-                    SoftwareUpdateIntentStore.save(context, attempted)
-                }
+                SoftwareUpdatePlan.Decision.ATTEMPT ->
+                    attemptPendingSoftwareInstall(client, pending, now)
                 SoftwareUpdatePlan.Decision.COMPLETED -> {
-                    SoftwareUpdateIntentStore.clear(context)
-                    NavStateManager.softwareUpdatePending = false
                     // The reboot cycle or an acceptance proves the
                     // update ran; a no-reboot window after an
                     // unconfirmed attempt only proves the state is
                     // stale, so say so instead of claiming success.
-                    NavStateManager.softwareUpdateCompletionNote =
+                    finishPendingSoftwareInstall(
                         if (pending.acceptedAtMs > 0L || pending.commaWentDown) {
                             "Comma software updated"
                         } else {
                             "Update state cleared — reopen Comma software to check"
                         }
+                    )
                 }
                 else -> Unit
             }
         } catch (e: Exception) {
             Log.w(TAG, "Pending software install failed: ${e.message}")
         }
+    }
+
+    /** Clears a pending install intent and leaves the user the completion note. */
+    private fun finishPendingSoftwareInstall(note: String) {
+        SoftwareUpdateIntentStore.clear(context)
+        NavStateManager.softwareUpdatePending = false
+        NavStateManager.softwareUpdateCompletionNote = note
+    }
+
+    /**
+     * Addendum 160: one attempt-cadence step of the pending-install
+     * engine. The status is checked BEFORE any (re-)POST — the
+     * previous blind retry loop is what wedged the state: the comma
+     * refused the duplicate install with a 409 ("Updater is busy")
+     * because its own updater already had the work, finished it and
+     * rebooted, and no completion path ever fired (the reboot is
+     * invisible to the commaWentDown latch — this engine only runs
+     * after a successful nav-status fetch, and a reboot takes nav
+     * status down with the heartbeat). Reconciling against the status
+     * (SoftwareUpdatePlan.reconcile) closes the intent from what the
+     * comma reports now: a moved installed commit, or an idle updater
+     * with nothing pending and nothing left to install. While the
+     * comma is busy the engine waits on status instead of POSTing;
+     * after a no-answer POST the unconfirmed window (evaluate) owns
+     * completion, and this step is never reached until it resolves.
+     */
+    private fun attemptPendingSoftwareInstall(
+        client: SgGalaxyClient,
+        pending: SoftwareUpdatePending,
+        now: Long
+    ) {
+        val updater = CommaSoftwareUpdate(client)
+        val status = try {
+            updater.fetchStatus()
+        } catch (e: Exception) {
+            Log.w(TAG, "Pending install status check failed: ${e.message}")
+            null
+        }
+        if (status != null) {
+            val facts = SoftwareUpdatePlan.StatusFacts(
+                installedCommit = status.commitShort,
+                updaterIdle = SoftwareUpdatePlan.isIdleUpdaterState(status.updaterState),
+                requestPending = status.requestPending,
+                finalizedReady = status.updateReady
+            )
+            when (SoftwareUpdatePlan.reconcile(pending, facts)) {
+                SoftwareUpdatePlan.Reconcile.COMPLETE_COMMIT_CHANGED -> {
+                    finishPendingSoftwareInstall("Comma software updated")
+                    return
+                }
+                SoftwareUpdatePlan.Reconcile.COMPLETE_NOTHING_LEFT -> {
+                    finishPendingSoftwareInstall(
+                        "Update state cleared — reopen Comma software to check"
+                    )
+                    return
+                }
+                SoftwareUpdatePlan.Reconcile.WAIT -> {
+                    // The comma is already working on an update:
+                    // don't POST into another refusal — re-check on
+                    // the next cadence, and reconciliation clears the
+                    // state when the comma's own work finishes.
+                    SoftwareUpdateIntentStore.save(
+                        context,
+                        pending.copy(lastAttemptMs = now, serverBusy = true)
+                    )
+                    return
+                }
+                SoftwareUpdatePlan.Reconcile.PROCEED -> Unit
+            }
+        } else if (pending.serverBusy) {
+            // The comma said its updater is busy and now the status
+            // read itself failed: keep waiting on status rather than
+            // blind-POSTing into another refusal.
+            return
+        }
+        val (code, body) = updater.postAction("install", pending.branch.ifEmpty { null })
+        // Addendum 134 + 160: classify the outcome. A 2xx is an
+        // acceptance. NO answer at all (transport failure -1, or the
+        // BLE ambiguous code) means the install may have started and
+        // taken the comma down before the response arrived: mark the
+        // attempt unconfirmed and let the reboot cycle (or the
+        // no-reboot window) complete it. A refusal whose reason says
+        // the updater is busy / a request is pending means the work
+        // is already happening server-side: wait on status (above)
+        // instead of re-arming the same POST. Any other answered
+        // refusal keeps retrying on the normal cadence.
+        val reason = body?.optString("error", "")?.ifEmpty { null }
+        val attempted = when (SoftwareUpdatePlan.classifyAttempt(code, reason)) {
+            SoftwareUpdatePlan.AttemptOutcome.ACCEPTED -> pending.copy(
+                lastAttemptMs = now,
+                acceptedAtMs = now,
+                attemptUnconfirmed = false,
+                serverBusy = false
+            )
+            SoftwareUpdatePlan.AttemptOutcome.UNCONFIRMED -> pending.copy(
+                lastAttemptMs = now,
+                attemptUnconfirmed = true,
+                serverBusy = false
+            )
+            SoftwareUpdatePlan.AttemptOutcome.BUSY_REFUSAL -> pending.copy(
+                lastAttemptMs = now,
+                attemptUnconfirmed = false,
+                serverBusy = true
+            )
+            SoftwareUpdatePlan.AttemptOutcome.REFUSED -> pending.copy(
+                lastAttemptMs = now,
+                attemptUnconfirmed = false,
+                serverBusy = false
+            )
+        }
+        SoftwareUpdateIntentStore.save(context, attempted)
     }
 
     /**

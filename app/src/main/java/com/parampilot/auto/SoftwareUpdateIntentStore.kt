@@ -18,6 +18,7 @@ object SoftwareUpdateIntentStore {
     private const val KEY_ACCEPTED_AT = "accepted_at_ms"
     private const val KEY_WENT_DOWN = "comma_went_down"
     private const val KEY_UNCONFIRMED = "attempt_unconfirmed"
+    private const val KEY_SERVER_BUSY = "server_busy"
 
     fun load(context: Context): SoftwareUpdatePending? {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -30,7 +31,8 @@ object SoftwareUpdateIntentStore {
             lastAttemptMs = prefs.getLong(KEY_LAST_ATTEMPT, 0L),
             acceptedAtMs = prefs.getLong(KEY_ACCEPTED_AT, 0L),
             commaWentDown = prefs.getBoolean(KEY_WENT_DOWN, false),
-            attemptUnconfirmed = prefs.getBoolean(KEY_UNCONFIRMED, false)
+            attemptUnconfirmed = prefs.getBoolean(KEY_UNCONFIRMED, false),
+            serverBusy = prefs.getBoolean(KEY_SERVER_BUSY, false)
         )
     }
 
@@ -43,6 +45,7 @@ object SoftwareUpdateIntentStore {
             .putLong(KEY_ACCEPTED_AT, pending.acceptedAtMs)
             .putBoolean(KEY_WENT_DOWN, pending.commaWentDown)
             .putBoolean(KEY_UNCONFIRMED, pending.attemptUnconfirmed)
+            .putBoolean(KEY_SERVER_BUSY, pending.serverBusy)
             .apply()
     }
 

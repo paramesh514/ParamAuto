@@ -399,7 +399,8 @@ class SgGalaxyClient(baseUrl: String) {
                 if (resp.status !in 200..299) {
                     ConnectionJournal.record(
                         ConnectionJournal.CAT_HTTP,
-                        "POST $path via BLE -> HTTP ${resp.status}"
+                        "POST $path via BLE -> HTTP ${resp.status}" +
+                            journalReasonSuffix(path, json)
                     )
                 }
                 return Pair(resp.status, json)
@@ -457,7 +458,8 @@ class SgGalaxyClient(baseUrl: String) {
                     if (resp.status !in 200..299) {
                         ConnectionJournal.record(
                             ConnectionJournal.CAT_HTTP,
-                            "POST $path via BLE -> HTTP ${resp.status}"
+                            "POST $path via BLE -> HTTP ${resp.status}" +
+                                journalReasonSuffix(path, json)
                         )
                     }
                     return Pair(resp.status, json)
@@ -467,7 +469,8 @@ class SgGalaxyClient(baseUrl: String) {
         if (result.first !in 200..299) {
             ConnectionJournal.record(
                 ConnectionJournal.CAT_HTTP,
-                "POST $path -> ${describeCode(result.first)}"
+                "POST $path -> ${describeCode(result.first)}" +
+                    journalReasonSuffix(path, result.second)
             )
         }
         return result
@@ -595,6 +598,18 @@ class SgGalaxyClient(baseUrl: String) {
         -1 -> "no answer"
         CODE_AMBIGUOUS -> "outcome unknown (no answer; may have executed)"
         else -> "HTTP $code"
+    }
+
+    /**
+     * Addendum 160: for software actions the journal line also carries
+     * the comma's own refusal reason (the error body) — a bare
+     * "HTTP 409" hid for days WHY the updater kept refusing (busy,
+     * reboot pending, not ready…). Other paths keep their terse form.
+     */
+    private fun journalReasonSuffix(path: String, body: JSONObject?): String {
+        if (path != "/api/software/action") return ""
+        val error = body?.optString("error", "").orEmpty()
+        return if (error.isEmpty()) "" else ": $error"
     }
 
     private fun getRaw(path: String): Pair<Int, String?> {
