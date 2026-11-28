@@ -37,4 +37,26 @@ object PhoneGuidance {
         maneuver.valid &&
             (maneuver.type == "arrive" || maneuver.modifier == "arrive") &&
             maneuver.distanceM <= ARRIVAL_DISTANCE_M
+
+    /**
+     * The phone-fetched route (Addendum 162) is the guidance route
+     * only while phone guidance is actually the navigator: a
+     * destination is queued, the comma is not guiding fresh, and
+     * the route was fetched for the destination on screen. In
+     * every other state the comma's route (or straight-line
+     * degradation) rules — when the comma accepts and guides, this
+     * returns null and the phone route is merely standby state,
+     * dropped when the destination changes or clears.
+     */
+    fun effectiveRoute(
+        phoneRoute: RouteOption?,
+        phoneRouteDestination: NavDestination?,
+        activeDestination: NavDestination?,
+        queued: Boolean,
+        commaGuiding: Boolean
+    ): RouteOption? {
+        if (phoneRoute == null || activeDestination == null) return null
+        if (!queued || commaGuiding) return null
+        return if (phoneRouteDestination?.isSameAs(activeDestination) == true) phoneRoute else null
+    }
 }

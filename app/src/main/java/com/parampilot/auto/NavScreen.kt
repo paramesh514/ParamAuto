@@ -674,7 +674,10 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
                     // Interpolated GPS for smooth 60 FPS motion (Section 7.3)
                     val gps = interpolatedGps ?: NavStateManager.currentGps ?: latest?.gps
                     val dest = NavStateManager.activeDestination ?: latest?.destination
-                    val route = NavStateManager.selectedRoute
+                    // Addendum 162: on phone guidance the rendered
+                    // route is the phone-fetched one (shared layer-2
+                    // state), not a straight line to the destination.
+                    val route = NavStateManager.selectedRoute ?: NavStateManager.phoneGuidanceRoute()
                     val speedMs = if (NavStateManager.speedMs > 0.0) NavStateManager.speedMs else (latest?.speedMs ?: 0.0)
                     val speedLimitMph = if (NavStateManager.speedLimitMph > 0) NavStateManager.speedLimitMph else (latest?.let { (it.speedLimit.limitMs * MS_TO_MPH).roundToInt() } ?: 0)
                     val power = NavStateManager.latestPower ?: latest?.power
@@ -1159,7 +1162,9 @@ class NavScreen(carContext: CarContext, private val client: CommaClient) :
     private fun buildNavTemplate(): Template {
         val pkt = NavStateManager.latestPacket ?: latest
         val dest = NavStateManager.activeDestination
-        val route = NavStateManager.selectedRoute
+        // Addendum 162: phone guidance shows the phone route's
+        // progress/ETA on the car screen too (same shared state).
+        val route = NavStateManager.selectedRoute ?: NavStateManager.phoneGuidanceRoute()
         val nav = pkt?.nav ?: NavManeuver()
 
         val mapActionStrip = buildMapActionStrip()

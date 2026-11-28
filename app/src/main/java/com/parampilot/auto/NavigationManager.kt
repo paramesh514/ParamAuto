@@ -894,11 +894,12 @@ class NavigationManager {
         searchPlaces(query, proxLat, proxLng, token).firstOrNull()
 
     /**
-     * Phone-side routing was removed (Param, 2026-10-31): the comma is the
-     * only router. This entry point is kept so existing callers still
-     * compile; it performs no network fetch and returns no routes. Routes
-     * reach the UI exclusively from the comma via the SG snapshot path
-     * (applySgSnapshotInternal).
+     * Phone-side Mapbox routing (Addendum 162: restored, reversing
+     * the 2026-10-31 removal — that removal was a comma-testing
+     * constraint, Param 2026-11-28). Mapbox Directions with steps
+     * and full GeoJSON geometry, parsed by [PhoneRoutes]. Empty on
+     * any failure: the plan walk in [fetchPhoneRoute] falls through
+     * to the next provider.
      */
     fun fetchRoutes(
         startLat: Double,
@@ -907,15 +908,41 @@ class NavigationManager {
         destLng: Double,
         token: String
     ): List<RouteOption> {
-        Log.d(TAG, "fetchRoutes: phone routing removed \u2014 comma is the only router")
-        return emptyList()
+        val cleanToken = token.trim()
+        if (cleanToken.isEmpty()) return emptyList()
+        var conn: HttpURLConnection? = null
+        return try {
+            val coordsStr = String.format(java.util.Locale.US, "%.6f,%.6f;%.6f,%.6f", startLng, startLat, destLng, destLat)
+            val urlStr = "https://api.mapbox.com/directions/v5/mapbox/driving/" +
+                coordsStr +
+                "?steps=true&geometries=geojson&overview=full&banner_instructions=true" +
+                "&access_token=$cleanToken"
+            UsageCounters.count(UsageCounters.MAPBOX_DIRECTIONS)
+            conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 8000
+                readTimeout = 8000
+            }
+            if (conn.responseCode != 200) {
+                val err = conn.errorStream?.bufferedReader()?.use { it.readText() }
+                Log.w(TAG, "Mapbox routing failed HTTP ${conn.responseCode}: $err")
+                return emptyList()
+            }
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            val routes = PhoneRoutes.parseMapboxDirections(JSONObject(body))
+            Log.i(TAG, "Mapbox routing loaded: ${routes.size} route(s), ${routes.firstOrNull()?.steps?.size ?: 0} steps")
+            routes
+        } catch (e: Exception) {
+            Log.w(TAG, "Mapbox routing failed: ${e.message}")
+            emptyList()
+        } finally {
+            conn?.disconnect()
+        }
     }
 
     /**
-     * Phone-side OSRM routing was removed together with the Mapbox fetcher
-     * (Param, 2026-10-31): the comma is the only router. Kept as a no-op so
-     * existing direct callers (the former no-token path) still compile; it
-     * performs no network fetch and returns no routes.
+     * Phone-side OSRM routing (Addendum 162: restored together with
+     * the Mapbox fetcher) — the key-free last resort of the routing
+     * plan, from the public OSRM demo server. Empty on any failure.
      */
     fun fetchRoutesOSRM(
         startLat: Double,
@@ -923,8 +950,125 @@ class NavigationManager {
         destLat: Double,
         destLng: Double
     ): List<RouteOption> {
-        Log.d(TAG, "fetchRoutesOSRM: phone routing removed \u2014 comma is the only router")
-        return emptyList()
+        var conn: HttpURLConnection? = null
+        return try {
+            val coordsStr = String.format(java.util.Locale.US, "%.6f,%.6f;%.6f,%.6f", startLng, startLat, destLng, destLat)
+            val urlStr = "https://router.project-osrm.org/route/v1/driving/" +
+                coordsStr +
+                "?overview=full&geometries=geojson&steps=true"
+            UsageCounters.count(UsageCounters.OSRM_DIRECTIONS)
+            conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 8000
+                readTimeout = 8000
+            }
+            if (conn.responseCode != 200) {
+                val err = conn.errorStream?.bufferedReader()?.use { it.readText() }
+                Log.w(TAG, "OSRM routing failed HTTP ${conn.responseCode}: $err")
+                return emptyList()
+            }
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            val routes = PhoneRoutes.parseOsrmRoutes(JSONObject(body))
+            Log.i(TAG, "OSRM routing loaded: ${routes.size} route(s), ${routes.firstOrNull()?.steps?.size ?: 0} steps")
+            routes
+        } catch (e: Exception) {
+            Log.w(TAG, "OSRM routing failed: ${e.message}")
+            emptyList()
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    /**
+     * Phone-side Google routing (Addendum 162) — the first provider
+     * of the routing plan when the phone Google key is usable.
+     * NOTE: the Directions API is a separate enablement from the
+     * APIs the phone key is documented for (Map Tiles, Places (New),
+     * Roads); without it Google answers REQUEST_DENIED, the parse
+     * yields no route, and the plan falls through to Mapbox/OSRM.
+     * Empty on any failure.
+     */
+    fun fetchGoogleRoutes(
+        startLat: Double,
+        startLng: Double,
+        destLat: Double,
+        destLng: Double,
+        key: String
+    ): List<RouteOption> {
+        val cleanKey = key.trim()
+        if (cleanKey.isEmpty()) return emptyList()
+        var conn: HttpURLConnection? = null
+        return try {
+            val origin = String.format(java.util.Locale.US, "%.6f,%.6f", startLat, startLng)
+            val destination = String.format(java.util.Locale.US, "%.6f,%.6f", destLat, destLng)
+            val urlStr = "https://maps.googleapis.com/maps/api/directions/json" +
+                "?origin=$origin&destination=$destination" +
+                "&key=${URLEncoder.encode(cleanKey, "UTF-8")}"
+            UsageCounters.count(UsageCounters.GOOGLE_DIRECTIONS)
+            conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 8000
+                readTimeout = 8000
+            }
+            if (conn.responseCode != 200) {
+                val err = conn.errorStream?.bufferedReader()?.use { it.readText() }
+                Log.w(TAG, "Google routing failed HTTP ${conn.responseCode}: $err")
+                return emptyList()
+            }
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            val json = JSONObject(body)
+            val routes = PhoneRoutes.parseGoogleDirections(json)
+            if (routes.isEmpty()) {
+                Log.w(TAG, "Google routing returned no route (status=${json.optString("status")})")
+            } else {
+                Log.i(TAG, "Google routing loaded: ${routes.size} route(s), ${routes.firstOrNull()?.steps?.size ?: 0} steps")
+            }
+            routes
+        } catch (e: Exception) {
+            Log.w(TAG, "Google routing failed: ${e.message}")
+            emptyList()
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    /**
+     * The phone-route fetch (Addendum 162): walks the layer-2
+     * routing plan ([PhoneSourceOrder.routingPlan], resolved by the
+     * caller) in order — Google, Mapbox, OSRM — and returns the
+     * first route any provider produces. A provider error or empty
+     * result falls through to the next; when every provider fails
+     * the result is null, [lastPhoneRouteError] says so, and phone
+     * guidance stays in its degraded mode (no fake route is ever
+     * installed). Runs on the caller's background thread.
+     */
+    fun fetchPhoneRoute(
+        startLat: Double,
+        startLng: Double,
+        destLat: Double,
+        destLng: Double,
+        plan: List<PhoneSourceOrder.Source>,
+        googleKey: String?,
+        mapboxToken: String?
+    ): RouteOption? {
+        for (source in plan) {
+            val routes = when (source) {
+                PhoneSourceOrder.Source.GOOGLE ->
+                    googleKey?.let { fetchGoogleRoutes(startLat, startLng, destLat, destLng, it) }
+                        ?: emptyList()
+                PhoneSourceOrder.Source.MAPBOX ->
+                    mapboxToken?.let { fetchRoutes(startLat, startLng, destLat, destLng, it) }
+                        ?: emptyList()
+                PhoneSourceOrder.Source.OSM ->
+                    fetchRoutesOSRM(startLat, startLng, destLat, destLng)
+            }
+            val route = routes.firstOrNull()
+            if (route != null) {
+                lastPhoneRouteError = null
+                lastPhoneRouteSource = PhoneSourceOrder.limitSourceLabel(source)
+                return route
+            }
+        }
+        lastPhoneRouteError = "no provider in the routing plan returned a route"
+        return null
     }
 
     fun fetchRoute(startLat: Double, startLng: Double, destLat: Double, destLng: Double, token: String): List<LatLng>? =
@@ -2097,6 +2241,17 @@ class NavigationManager {
         @Volatile
         var lastSendError: String? = null
             private set
+
+        /** Why the most recent phone-route fetch failed (Addendum
+         *  162); null after a success. The guidance driver journals
+         *  it so an all-providers failure is visible, never silent. */
+        @Volatile
+        var lastPhoneRouteError: String? = null
+
+        /** Which provider produced the current phone route
+         *  ("google" / "mapbox" / "osm"); null until one does. */
+        @Volatile
+        var lastPhoneRouteSource: String? = null
 
         /** The most recent send's raw outcome code (Addendum 146):
          *  a positive HTTP status when the comma ANSWERED, -1 on a
