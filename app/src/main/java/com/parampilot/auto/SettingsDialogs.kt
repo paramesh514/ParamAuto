@@ -926,6 +926,17 @@ class SettingsDialogs(private val activity: Activity) {
         val isConnected = NavStateManager.isBleConnected || (client?.commaFound == true)
         val voltStr = NavStateManager.latestPower?.voltageV
             ?.takeIf { it > 1.0 }?.let { "${"%.1f".format(it)}V" }
+        // The comma's IP rides the row subtitle too (Param,
+        // 2026-11-27): the address in use, or the learned local
+        // address while Bluetooth or Cloud serves (Addendum 157).
+        val rowIp = ConnectionIpDisplay.rowIp(
+            transport = NavStateManager.activeTransport,
+            activeIp = client?.commaIp,
+            learnedIp = client?.getLearnedLocalIp()
+                ?: client?.getLastScannedIp()
+                ?: client?.getUserLocalIp()
+                ?: client?.getSavedIp()
+        )
 
         val connMode = client?.getConnectionMode() ?: CommaClient.MODE_AUTO
         val hasAuthError = !GalaxyCloudSession.hasPassword() || GalaxyCloudSession.authFailed
@@ -939,7 +950,11 @@ class SettingsDialogs(private val activity: Activity) {
             createSettingsRow(
                 iconKind = SettingsIconView.Kind.HUB,
                 title = "Connection mode",
-                subtitle = if (voltStr != null) "$modeText · $voltStr" else modeText,
+                subtitle = listOfNotNull(
+                    modeText,
+                    rowIp?.takeIf { it != modeText },
+                    voltStr
+                ).joinToString(" · "),
                 badgeText = badgeLabel,
                 badgeActive = isConnected,
                 pal = pal
@@ -1583,6 +1598,33 @@ class SettingsDialogs(private val activity: Activity) {
             refreshModeRows()
 
             body.addView(listCard)
+
+            // The comma's IP, displayed (Param, 2026-11-27): the
+            // address in use while Local serves, or the learned
+            // local address (Addendum 156) while Bluetooth or Cloud
+            // serves — the address the Local probe will try. Read
+            // from the existing holders at open time; this dialog
+            // does not re-render on state changes today, and display
+            // never fetches — the heartbeat/learn paths own freshness.
+            val ipStatusText = ConnectionIpDisplay.statusText(
+                transport = NavStateManager.activeTransport,
+                activeIp = client?.commaIp,
+                learnedIp = client?.getLearnedLocalIp()
+                    ?: client?.getLastScannedIp()
+                    ?: client?.getUserLocalIp()
+                    ?: client?.getSavedIp(),
+                savedIp = client?.getLastScannedIp()
+                    ?: client?.getUserLocalIp()
+                    ?: client?.getSavedIp()
+            )
+            if (ipStatusText != null) {
+                body.addView(TextView(activity).apply {
+                    text = ipStatusText
+                    dpText(12.5f)
+                    setTextColor(pal.textSecondary)
+                    setPadding(dp(4), dp(10), dp(4), 0)
+                })
+            }
             body.addView(ipSection)
             body.addView(cloudSection)
 
