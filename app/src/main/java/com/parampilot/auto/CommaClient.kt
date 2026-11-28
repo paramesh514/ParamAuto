@@ -1395,9 +1395,16 @@ class CommaClient(private val context: Context) {
      * callers then fall back to their scan exactly as before. Never
      * prompts: a missing or expired cloud session just skips the step.
      */
-    private fun probeCloudReportedAddresses(): String? {
+    /**
+     * GET /api/local-access over the configured Galaxy Cloud session:
+     * the LAN addresses the comma reports about itself, in payload
+     * order, or null when Cloud is not configured, no session token
+     * is stored, or the fetch fails. Shared by the scan-time probe
+     * below and the per-heartbeat Cloud learn (Addendum 156) — one
+     * request shape for both.
+     */
+    private fun fetchCloudLocalAccessIps(): List<String>? {
         if (!isCloudConfigured()) return null
-        if (!scanner.lanScanAllowed()) return null
         val token = GalaxyCloudSession.currentToken()?.takeIf { it.isNotEmpty() } ?: return null
         val base = getGalaxyCloudBase().trimEnd('/')
         val body = try {
@@ -1417,7 +1424,13 @@ class CommaClient(private val context: Context) {
             Log.d(TAG, "local-access over Cloud failed: ${e.message}")
             return null
         }
-        val ips = BleFailover.parseLocalAccessIps(JSONObject(body))
+        return BleFailover.parseLocalAccessIps(JSONObject(body))
+    }
+
+    private fun probeCloudReportedAddresses(): String? {
+        if (!isCloudConfigured()) return null
+        if (!scanner.lanScanAllowed()) return null
+        val ips = fetchCloudLocalAccessIps() ?: return null
         for (candidate in ips) {
             if (scanner.isPortOpen(candidate) && scanner.verifyComma(candidate)) {
                 notifyDiagnostic("Comma address from Galaxy ($candidate) — no scan needed")
@@ -1434,9 +1447,10 @@ class CommaClient(private val context: Context) {
 
     /**
      * The comma's LAN address as last reported by the comma itself via
-     * GET /api/local-access over the BLE bridge. Written by the learn
-     * thread below, read by the failover thread (direct probe) and
-     * persisted so relaunches inherit it.
+     * GET /api/local-access over the serving session (BLE bridge or
+     * Galaxy Cloud). Written by the learn threads below, read by the
+     * failover thread (direct probe) and persisted so relaunches
+     * inherit it.
      */
     @Volatile
     private var lastLocalAccessIp: String? = null
@@ -1448,14 +1462,15 @@ class CommaClient(private val context: Context) {
      * the comma is actually listening on. Called from the poll loop's
      * transport-sync section; [BleFailover.shouldFetchLocalAccess]
      * gates it to the transport-flip pass and then at most once per
-     * [BleFailover.LEARN_INTERVAL_MS]. Learning ONLY: the result is
-     * persisted for the failover and for future launches, but the
-     * live transport and endpoint never move while Bluetooth is up.
+     * [BleFailover.LEARN_INTERVAL_MS]. The per-heartbeat learn
+     * (Addendum 156) runs the same fetch without the cadence gate.
+     * Learning ONLY: the result is persisted for the failover, for
+     * the Local probe and for future launches, but the live
+     * transport and endpoint never move while Bluetooth is up.
      * Failures are log-only — a missed learn just means the failover
      * falls back to its quick check / scan.
      */
     private fun maybeLearnLocalAccessOverBle() {
-        val ble = BleBridgeClient.getConnectedClient() ?: return
         val now = System.currentTimeMillis()
         if (!BleFailover.shouldFetchLocalAccess(
                 bleConnected = true,
@@ -1463,8 +1478,14 @@ class CommaClient(private val context: Context) {
                 lastFetchMs = lastLocalAccessLearnMs
             )
         ) return
+        learnLocalAccessOverBleNow()
+    }
+
+    /** The BLE local-access fetch itself, single-flight. */
+    private fun learnLocalAccessOverBleNow() {
+        val ble = BleBridgeClient.getConnectedClient() ?: return
         if (!localAccessLearnInFlight.compareAndSet(false, true)) return
-        lastLocalAccessLearnMs = now
+        lastLocalAccessLearnMs = System.currentTimeMillis()
         Thread({
             try {
                 val resp = ble.request(
@@ -1475,11 +1496,8 @@ class CommaClient(private val context: Context) {
                 )
                 if (resp.status == 200) {
                     val ips = BleFailover.parseLocalAccessIps(JSONObject(resp.bodyText()))
-                    val first = ips.firstOrNull()
-                    if (first != null) {
-                        lastLocalAccessIp = first
-                        persistLearnedLocalIp(first)
-                        Log.i(TAG, "Learned comma LAN address over Bluetooth: $first (of ${ips.size})")
+                    if (ips.isNotEmpty()) {
+                        applyLearnedLocalIps(ips)
                     } else {
                         Log.d(TAG, "local-access over BLE reported no LAN address")
                     }
@@ -1507,6 +1525,84 @@ class CommaClient(private val context: Context) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit().putString(KEY_IP, ip).apply()
         saveLastScannedIp(ip)
+    }
+
+    /**
+     * Records what a local-access learn (either serving transport)
+     * reported: [HeartbeatLocalIp] decides the candidate — the first
+     * reported address on the phone's own subnet, replacing the
+     * saved one when the comma's address moved — and a real change
+     * is written to every slot the Local side reads: the in-memory
+     * learned address (the failover's direct probe), the saved
+     * endpoint prefs ([persistLearnedLocalIp], which quickCheckLan
+     * tries) and the per-scope last-known slot
+     * ([NetworkScanner.rememberLastKnown], which re-checks the scope
+     * itself). An address the comma reports about itself counts as
+     * verified, so it may occupy the verified-finds slot. An
+     * off-subnet report changes nothing — the old candidate stays.
+     */
+    private fun applyLearnedLocalIps(reportedIps: List<String>) {
+        val candidate = HeartbeatLocalIp.candidate(
+            reportedIps = reportedIps,
+            plan = scanner.currentPlan(),
+            savedIp = lastLocalAccessIp ?: getSavedIp(),
+            transport = NavStateManager.activeTransport
+        ) ?: return
+        lastLocalAccessIp = candidate
+        persistLearnedLocalIp(candidate)
+        scanner.rememberLastKnown(candidate)
+        Log.i(TAG, "Learned comma LAN address from the comma itself: $candidate")
+    }
+
+    private val cloudLocalAccessLearnInFlight = AtomicBoolean(false)
+
+    /**
+     * The Cloud twin of the BLE learn: GET /api/local-access over
+     * the Galaxy Cloud session (the same request the scan-time probe
+     * uses), recorded by [applyLearnedLocalIps]. Single-flight;
+     * fetch failures are log-only inside the fetch.
+     */
+    private fun learnLocalAccessOverCloudNow() {
+        if (!cloudLocalAccessLearnInFlight.compareAndSet(false, true)) return
+        Thread({
+            try {
+                val ips = fetchCloudLocalAccessIps()
+                if (!ips.isNullOrEmpty()) {
+                    applyLearnedLocalIps(ips)
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "local-access learn over Cloud failed: ${e.message}")
+            } finally {
+                cloudLocalAccessLearnInFlight.set(false)
+            }
+        }, "comma-cloud-local-access").start()
+    }
+
+    /**
+     * Addendum 156 (Param, 2026-11-27): "When comma connected. Fetch
+     * local IP too in every heartbeat if transport is not local.
+     * Then use same for connecting." Called once per poll cycle
+     * after a successful heartbeat fetch: while Bluetooth or Galaxy
+     * Cloud serves, the comma's current LAN address is learned from
+     * the comma itself (GET /api/local-access over the serving
+     * session) and recorded as the Local candidate, so the existing
+     * Local probe and the per-heartbeat rank upgrade the session to
+     * Local at the comma's CURRENT address — a moved DHCP address
+     * replaces the stale saved one on the next heartbeat instead of
+     * stranding the app on a dead address until a scan happens.
+     * While Local serves there is nothing to learn: the heartbeat
+     * already runs over the local address. Quiet-while-updating
+     * still applies — a pending software update means
+     * heartbeat-only, so no learn runs. Learning never moves the
+     * live transport or endpoint; only the existing rank logic does.
+     */
+    private fun maybeLearnLocalIpOnHeartbeat() {
+        if (NavStateManager.softwareUpdatePending) return
+        when (NavStateManager.activeTransport) {
+            NavStateManager.TransportType.BLUETOOTH -> learnLocalAccessOverBleNow()
+            NavStateManager.TransportType.CLOUD -> learnLocalAccessOverCloudNow()
+            else -> Unit
+        }
     }
 
     private val queueFlushInFlight = AtomicBoolean(false)
@@ -1896,6 +1992,12 @@ class CommaClient(private val context: Context) {
                         }
                     }.start()
                 }
+                // Addendum 156: every heartbeat on a non-Local
+                // transport also learns the comma's current LAN
+                // address from the comma itself, so the Local probe
+                // connects at the fresh address (see
+                // maybeLearnLocalIpOnHeartbeat).
+                maybeLearnLocalIpOnHeartbeat()
                 val phoneOk = HeartbeatTransport.phoneDataAllowed(NavStateManager.activeTransport)
                 val liveGps = pkt.gps ?: if (phoneOk) lastPhoneGps else null
                 val liveSpeed = if (pkt.speedMs > 0.0 || !phoneOk) pkt.speedMs else gpsSpeedMs

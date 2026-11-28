@@ -190,6 +190,14 @@ class NetworkScanner(
     fun localSubnetBases(): List<String> = scanPlan().bases
 
     /**
+     * The current scan plan (the [LanScanScope] facts gathered live),
+     * for pure decisions outside the scanner — e.g. the heartbeat
+     * local-IP learn deciding whether an address the comma reported
+     * about itself sits on the phone's own subnet.
+     */
+    fun currentPlan(): LanScanScope.Plan = scanPlan()
+
+    /**
      * Whether any LAN probing makes sense right now (Param,
      * 2026-11-12): Wi-Fi and Hotspot both off means there is no local
      * network to probe — callers skip every LAN step and go straight
