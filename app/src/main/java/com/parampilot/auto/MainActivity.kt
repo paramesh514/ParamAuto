@@ -1334,9 +1334,11 @@ class MainActivity : Activity() {
                 }
             }
         }
-        val starredMatches = Bookmarks.getStarred(this).filter {
-            it.name.contains(query, ignoreCase = true) || it.placeName.contains(query, ignoreCase = true)
-        }
+        // Instant local rows are the comma's own places (Addendum
+        // 158): its favorites + recents, text-matched on the phone.
+        val localMatches = CommaPlaces.matches(
+            NavStateManager.commaFavorites + NavStateManager.commaRecents, query
+        )
 
         // Result shaping (Param, 2026-11-20): dedupe without
         // collapsing coordinate-less suggestions into one row, and
@@ -1361,12 +1363,12 @@ class MainActivity : Activity() {
             // Cache hit is final for this query — no search follows,
             // so no spinner.
             topBar.setSearchLoading(false)
-            topBar.showResults(ordered(starredMatches + cached))
+            topBar.showResults(ordered(localMatches + cached))
             return
         }
 
-        if (starredMatches.isNotEmpty()) {
-            topBar.showResults(starredMatches)
+        if (localMatches.isNotEmpty()) {
+            topBar.showResults(localMatches)
         }
 
         // Connectivity matrix (Addendum 143): scenario 4 (both
@@ -1376,7 +1378,7 @@ class MainActivity : Activity() {
         val scenario = ConnectivityMatrix.current()
         if (!ConnectivityMatrix.searchAllowed(scenario)) {
             topBar.setSearchLoading(false)
-            topBar.showResults(ordered(starredMatches))
+            topBar.showResults(ordered(localMatches))
             Toast.makeText(this, CarScreenNotice.NO_INTERNET_CONNECTIVITY, Toast.LENGTH_LONG).show()
             return
         }
@@ -1440,7 +1442,6 @@ class MainActivity : Activity() {
                 for (d in places) {
                     if (d.hasCoordinates) {
                         SearchCache.putResolved(this, d)
-                        DestinationHistory.record(this, d)
                     }
                 }
             }
@@ -1458,7 +1459,7 @@ class MainActivity : Activity() {
                     // (A superseded query leaves the spinner to the
                     // newer search that replaced it.)
                     topBar.setSearchLoading(false)
-                    topBar.showResults(ordered(starredMatches + places))
+                    topBar.showResults(ordered(localMatches + places))
                 }
             }
         }.start()
@@ -1568,7 +1569,6 @@ class MainActivity : Activity() {
         if (queuedDestinationBlocks(dest)) return
         isNavClearedByUser = false
         NavStateManager.setNavClearedByUser(false)  // re-enable dest syncing from Comma telemetry
-        DestinationHistory.record(this, dest)
         activeDestination = dest; topBar.setDestination(dest); topBar.setVisible(false)
         NavStateManager.activeDestination = dest
         // A destination the app accepts supersedes any end state.
@@ -1747,7 +1747,6 @@ class MainActivity : Activity() {
         if (::arrivalCard.isInitialized) arrivalCard.hide()
         if (::driveSummaryCard.isInitialized) driveSummaryCard.hide()
         if (::lastDriveCard.isInitialized) lastDriveCard.hide()
-        DestinationHistory.record(this, dest)
         activeDestination = dest; topBar.setDestination(dest); topBar.setVisible(false)
         if (notifySharedState) {
             NavStateManager.activeDestination = dest
@@ -2604,18 +2603,48 @@ class MainActivity : Activity() {
                 visibility = View.GONE
                 setOnClickListener {
                     val dest = pendingPickedDest ?: return@setOnClickListener
-                    val mode = currentMapPickMode
-                    if (mode == MapPickMode.HOME) {
-                        Bookmarks.setHome(this@MainActivity, dest)
-                        Toast.makeText(this@MainActivity, "Home saved", Toast.LENGTH_SHORT).show()
-                    } else if (mode == MapPickMode.OFFICE) {
-                        Bookmarks.setOffice(this@MainActivity, dest)
-                        Toast.makeText(this@MainActivity, "Work saved", Toast.LENGTH_SHORT).show()
+                    val mode = currentMapPickMode ?: return@setOnClickListener
+                    // Addendum 158: Home/Work are comma favorites
+                    // labeled "home"/"work" — the pick is saved ON
+                    // the comma, never in phone memory. Without a
+                    // connected comma there is nowhere to save it;
+                    // say so and keep the pick open.
+                    val label = if (mode == MapPickMode.HOME) {
+                        CommaPlaces.LABEL_HOME
+                    } else {
+                        CommaPlaces.LABEL_WORK
                     }
-                    exitMapPickMode()
-                    topBar.refreshSuggestions()
-                    topBar.showInitialSuggestions()
-                    NavStateManager.notifyChanged()
+                    val modeName = if (mode == MapPickMode.HOME) "Home" else "Work"
+                    val baseUrl = commaPlacesBaseUrl()
+                    if (baseUrl == null) {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Connect to the comma to save $modeName — saved places live on the comma",
+                            Toast.LENGTH_LONG
+                        ).show()
+                        return@setOnClickListener
+                    }
+                    Thread {
+                        val ok = navManager.favoriteCommaPlaceSg(baseUrl, dest, label)
+                        runOnUiThread {
+                            if (ok) {
+                                Toast.makeText(
+                                    this@MainActivity, "$modeName saved", Toast.LENGTH_SHORT
+                                ).show()
+                                exitMapPickMode()
+                                topBar.refreshSuggestions()
+                                topBar.showInitialSuggestions()
+                                NavStateManager.notifyChanged()
+                            } else {
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    NavigationManager.lastSendError
+                                        ?: "The comma did not save $modeName",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
+                    }.start()
                 }
             }
             addView(mapPickConfirmBtn)
@@ -2724,8 +2753,21 @@ class MainActivity : Activity() {
         return "%.5f, %.5f".format(java.util.Locale.US, latLng.latitude, latLng.longitude)
     }
 
+    /**
+     * Base URL for the comma's saved-place actions (Addendum 158), or
+     * null when no SG comma is connected — saved places live on the
+     * comma, so without one there is nothing to save to or remove from.
+     */
+    private fun commaPlacesBaseUrl(): String? {
+        if (!NavStateManager.isSgGalaxy) return null
+        val target = client?.getEffectiveNavigationEndpoint()
+        return if (target.isNullOrBlank()) null else SgGalaxyClient.baseUrlFor(target)
+    }
+
     private fun promptStarDestination(dest: NavDestination) {
-        val isAlreadyStarred = Bookmarks.isStarred(this, dest)
+        // Addendum 158: "starred" = saved as a favorite ON THE COMMA.
+        val existingFavorite = CommaPlaces.favoriteFor(NavStateManager.commaFavorites, dest)
+        val isAlreadyStarred = existingFavorite != null
         val density = resources.displayMetrics.density
         fun dp(v: Int) = (v * density).roundToInt()
 
@@ -2751,24 +2793,65 @@ class MainActivity : Activity() {
         }
         sheetBody.addView(input)
         val buttons = mutableListOf<TextView>()
-        if (isAlreadyStarred) {
+        if (isAlreadyStarred && existingFavorite != null) {
             buttons += M3Sheet.dangerButton(this, pal, "Remove") {
-                Bookmarks.removeStarred(this, dest)
-                Toast.makeText(
-                    this, "Removed from saved places", Toast.LENGTH_SHORT
-                ).show()
-                topBar.refreshSuggestions()
+                val baseUrl = commaPlacesBaseUrl()
+                if (baseUrl == null) {
+                    Toast.makeText(
+                        this, "Connect to the comma to manage saved places",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@dangerButton
+                }
                 dialog.dismiss()
+                Thread {
+                    val ok = navManager.removeCommaFavoriteSg(baseUrl, existingFavorite)
+                    runOnUiThread {
+                        if (ok) {
+                            Toast.makeText(
+                                this, "Removed from saved places", Toast.LENGTH_SHORT
+                            ).show()
+                            topBar.refreshSuggestions()
+                        } else {
+                            Toast.makeText(
+                                this,
+                                NavigationManager.lastSendError
+                                    ?: "The comma did not remove it",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                }.start()
             }
         }
         buttons += M3Sheet.tonalButton(this, pal, "Cancel") { dialog.dismiss() }
         buttons += M3Sheet.primaryButton(this, pal, "Save") {
+            val baseUrl = commaPlacesBaseUrl()
+            if (baseUrl == null) {
+                Toast.makeText(
+                    this, "Connect to the comma to save places — they live on the comma",
+                    Toast.LENGTH_LONG
+                ).show()
+                return@primaryButton
+            }
             val name = input.text.toString().trim().ifEmpty { dest.name }
             val savedDest = dest.copy(name = name)
-            Bookmarks.addStarred(this, savedDest)
-            Toast.makeText(this, "Saved \"$name\"", Toast.LENGTH_SHORT).show()
-            topBar.refreshSuggestions()
             dialog.dismiss()
+            Thread {
+                val ok = navManager.favoriteCommaPlaceSg(baseUrl, savedDest)
+                runOnUiThread {
+                    if (ok) {
+                        Toast.makeText(this, "Saved \"$name\"", Toast.LENGTH_SHORT).show()
+                        topBar.refreshSuggestions()
+                    } else {
+                        Toast.makeText(
+                            this,
+                            NavigationManager.lastSendError ?: "The comma did not save it",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            }.start()
         }
         sheetBody.addView(M3Sheet.buttonRow(this, *buttons.toTypedArray()))
         dialog.show()

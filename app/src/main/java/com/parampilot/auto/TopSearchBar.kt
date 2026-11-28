@@ -351,10 +351,13 @@ class TopSearchBar(
             }
         }
 
-        val isHomeConfigured = Bookmarks.isHomeConfigured(context)
-        val homeDest = Bookmarks.getHome(context)
+        // Home / Work / saved chips read the comma's own favorites
+        // (Addendum 158): Home and Work are the favorites labeled
+        // "home" / "work" in the latest snapshot; the saved chip is
+        // the first unlabeled favorite.
+        val homeDest = NavStateManager.commaHome
         quickChipsRow.addView(makeQuickChip("Home", PlaceVectorIconView.IconKind.HOME) {
-            if (isHomeConfigured && homeDest != null) {
+            if (homeDest != null) {
                 selectDestinationDirect(homeDest)
             } else {
                 hideResults()
@@ -363,10 +366,9 @@ class TopSearchBar(
             }
         })
 
-        val isOfficeConfigured = Bookmarks.isOfficeConfigured(context)
-        val officeDest = Bookmarks.getOffice(context)
+        val officeDest = NavStateManager.commaWork
         quickChipsRow.addView(makeQuickChip("Work", PlaceVectorIconView.IconKind.WORK) {
-            if (isOfficeConfigured && officeDest != null) {
+            if (officeDest != null) {
                 selectDestinationDirect(officeDest)
             } else {
                 hideResults()
@@ -375,9 +377,8 @@ class TopSearchBar(
             }
         })
 
-        val starred = Bookmarks.getStarred(context)
-        if (starred.isNotEmpty()) {
-            val firstSaved = starred.first()
+        val firstSaved = NavStateManager.commaFavorites.firstOrNull { it.commaLabel == null }
+        if (firstSaved != null) {
             quickChipsRow.addView(makeQuickChip(firstSaved.name.take(14), PlaceVectorIconView.IconKind.STAR_FILLED) {
                 selectDestinationDirect(firstSaved)
             })
@@ -397,19 +398,19 @@ class TopSearchBar(
 
         val gps = NavStateManager.currentGps
 
-        // The comma's own places (Feature 8): favorites lead, recents
-        // follow, deduplicated against each other. The phone Recent
-        // section below filters against this combined list too, so a
-        // place never appears twice in the dropdown.
+        // The comma's own places (Feature 8; Addendum 158: the ONLY
+        // places store — the phone's starred/recents memory is gone):
+        // favorites lead, recents follow, deduplicated against each
+        // other, so a place never appears twice in the dropdown.
         val commaFavorites = NavStateManager.commaFavorites
         val commaRecents = NavStateManager.commaRecents.filter { r ->
             commaFavorites.none { it.isSameAs(r) }
         }
         val commaPlaces = commaFavorites + commaRecents
 
-        // 1. Home Row
-        val isHomeConfigured = Bookmarks.isHomeConfigured(context)
-        val homeDest = Bookmarks.getHome(context)
+        // 1. Home Row — the comma favorite labeled "home".
+        val homeDest = NavStateManager.commaHome
+        val isHomeConfigured = homeDest != null
         val homeSubtitle = if (isHomeConfigured && homeDest != null) {
             val distStr = shortcutSubtitle(gps, homeDest)
             val addr = homeDest.placeName.ifEmpty { "Saved address" }
@@ -445,9 +446,9 @@ class TopSearchBar(
             )
         )
 
-        // 2. Work Row
-        val isOfficeConfigured = Bookmarks.isOfficeConfigured(context)
-        val officeDest = Bookmarks.getOffice(context)
+        // 2. Work Row — the comma favorite labeled "work".
+        val officeDest = NavStateManager.commaWork
+        val isOfficeConfigured = officeDest != null
         val officeSubtitle = if (isOfficeConfigured && officeDest != null) {
             val distStr = shortcutSubtitle(gps, officeDest)
             val addr = officeDest.placeName.ifEmpty { "Saved address" }
@@ -483,27 +484,7 @@ class TopSearchBar(
             )
         )
 
-        // 3. Saved Places
-        val starred = Bookmarks.getStarred(context)
-        if (starred.isNotEmpty()) {
-            resultsList.addView(createSectionHeader("Saved", textMuted))
-            for (dest in starred) {
-                resultsList.addView(
-                    createDestinationRow(
-                        dest = dest,
-                        kind = PlaceVectorIconView.IconKind.STAR_FILLED,
-                        isStarred = true,
-                        isNight = isNight,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted,
-                        onRowClick = { selectDestinationDirect(dest) },
-                        onStarClick = { onStarDestinationClicked(dest) }
-                    )
-                )
-            }
-        }
-
-        // 3b. From your comma — the device's own favorites, then recents.
+        // 3. From your comma — the device's own favorites, then recents.
         // Rows carry real coordinates, so a tap flows through the normal
         // device-confirmed send like any other destination.
         if (commaPlaces.isNotEmpty()) {
@@ -528,33 +509,6 @@ class TopSearchBar(
                         dest = dest,
                         kind = PlaceVectorIconView.IconKind.PIN,
                         isStarred = false,
-                        isNight = isNight,
-                        textPrimary = textPrimary,
-                        textMuted = textMuted,
-                        onRowClick = { selectDestinationDirect(dest) },
-                        onStarClick = { onStarDestinationClicked(dest) }
-                    )
-                )
-            }
-        }
-
-        // 4. Recent Places (deduplicated against Home, Work, Saved, and comma places)
-        val recent = DestinationHistory.recent(context, 8).filter { r ->
-            val matchesHome = isHomeConfigured && homeDest != null && (r.isSameAs(homeDest) || r.name.equals("Home", ignoreCase = true))
-            val matchesWork = isOfficeConfigured && officeDest != null && (r.isSameAs(officeDest) || r.name.equals("Office", ignoreCase = true) || r.name.equals("Work", ignoreCase = true))
-            val matchesStarred = starred.any { it.isSameAs(r) }
-            val matchesComma = commaPlaces.any { it.isSameAs(r) }
-            !matchesHome && !matchesWork && !matchesStarred && !matchesComma
-        }.take(4)
-        if (recent.isNotEmpty()) {
-            resultsList.addView(createSectionHeader("Recent", textMuted))
-            for (dest in recent) {
-                val isDestStarred = Bookmarks.isStarred(context, dest)
-                resultsList.addView(
-                    createDestinationRow(
-                        dest = dest,
-                        kind = PlaceVectorIconView.IconKind.RECENT,
-                        isStarred = isDestStarred,
                         isNight = isNight,
                         textPrimary = textPrimary,
                         textMuted = textMuted,
@@ -793,7 +747,8 @@ class TopSearchBar(
         val textMuted = if (isNight) HudOverlay.COLOR_TEXT_MUTED else HudOverlay.COLOR_TEXT_MUTED_LIGHT
 
         for (dest in destinations) {
-            val isStarred = Bookmarks.isStarred(context, dest)
+            // Star state = saved on the comma (Addendum 158).
+            val isStarred = CommaPlaces.isFavorite(NavStateManager.commaFavorites, dest)
             val row = createDestinationRow(
                 dest = dest,
                 kind = PlaceVectorIconView.IconKind.PIN,

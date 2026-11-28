@@ -416,6 +416,14 @@ object NavStateManager {
     @Volatile
     var commaFavorites: List<NavDestination> = emptyList()
 
+    /** Home (Addendum 158): the comma favorite labeled "home" in the
+     *  latest snapshot; null when the comma has none (or no snapshot
+     *  has arrived). There is no phone-side Home store anymore. */
+    val commaHome: NavDestination? get() = CommaPlaces.home(commaFavorites)
+
+    /** Work (Addendum 158): the comma favorite labeled "work". */
+    val commaWork: NavDestination? get() = CommaPlaces.work(commaFavorites)
+
     /** When the comma last rerouted the active destination (Feature 9); 0 = never. */
     @Volatile
     var reroutingAtMs: Long = 0L
