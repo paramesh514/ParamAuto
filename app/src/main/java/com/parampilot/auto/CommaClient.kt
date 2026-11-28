@@ -1530,6 +1530,10 @@ class CommaClient(private val context: Context) {
         val queued = entry!!
         Thread({
             try {
+                // Addendum 155: a flush attempt is send activity —
+                // refresh the pending grace so the clear guard's
+                // backstop measures from the last try, not the tap.
+                NavStateManager.refreshDestinationPending(queued.displayDestination())
                 val endpoint = getEffectiveNavigationEndpoint()
                 val baseUrl = SgGalaxyClient.baseUrlFor(endpoint)
                 val ok = when (queued.kind) {
@@ -2401,6 +2405,9 @@ class CommaClient(private val context: Context) {
                 NavStateManager.activeDestination = newDest
                 NavStateManager.notifyChanged()
             }
+            // Addendum 155: this snapshot carried the destination —
+            // the comma has registered it.
+            NavStateManager.noteDestinationConfirmedBySnapshot()
             NavigationManager.startNavigationRefresh { getEffectiveNavigationEndpoint() }
             // Reopen continuity (Param, 2026-11-06): a route the
             // comma already has — adopted here, e.g. after the app
@@ -2495,6 +2502,9 @@ class CommaClient(private val context: Context) {
         }
 
         if (NavStateManager.activeDestination != null) {
+            // Addendum 155: the comma is publishing a live route for
+            // this destination — that is a snapshot confirmation too.
+            NavStateManager.noteDestinationConfirmedBySnapshot()
             NavStateManager.activeRoutes = routesList
             NavStateManager.selectedRouteId = selectedIdx
             sgRoutePublished = true
@@ -2558,11 +2568,22 @@ class CommaClient(private val context: Context) {
     /**
      * publishSgRoute, route-ended branch (extracted 2026-11-08).
      * Returns true when the end was applied and the caller must
-     * stop; false while the destination-pending grace is running
-     * (the caller then continues with the rest of the publish).
+     * stop; false while the destination-clear guard keeps the
+     * destination (the caller then continues with the rest of the
+     * publish).
      */
     private fun applyPublishedRouteEnd(status: JSONObject): Boolean {
-        if (NavStateManager.isDestinationPendingGrace()) return false
+        // Addendum 155: the clear decision is centralized in
+        // NavStateManager (DestinationClearGuard) — a bare
+        // destination-less snapshot no longer clears a destination
+        // the comma has not snapshot-confirmed yet, one that is
+        // queued, or (until 3 bare empties in a row) one it had
+        // confirmed; an explicit ended status still clears at once.
+        val explicitEnded =
+            status.optString("status", "").lowercase() in SgSnapshot.ENDED_STATUSES
+        if (NavStateManager.evaluateDestinationEnd(explicitEnded) ==
+            DestinationClearGuard.Decision.KEEP
+        ) return false
         // Same device-confirmation note the refresh writer
         // makes (bug fix, 2026-11-08): whichever writer sees
         // the end first resolves the End Route state.

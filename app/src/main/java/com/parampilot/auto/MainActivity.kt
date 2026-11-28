@@ -1125,8 +1125,14 @@ class MainActivity : Activity() {
             updateTripInfo(pktDest, pkt)
             // The comma's route for this destination arrives via the SG
             // snapshot into NavStateManager.activeRoutes (no phone fetch).
-        } else if (pktDest == null && activeDestination != null && !NavStateManager.isDestinationPendingGrace()) {
-            // Navigation has ended on Comma (destination reached, canceled, or cleared)
+        } else if (pktDest == null && activeDestination != null &&
+            NavStateManager.evaluateDestinationEnd(explicitEnded = false) ==
+                DestinationClearGuard.Decision.CLEAR) {
+            // Navigation has ended on Comma (destination reached, canceled, or cleared).
+            // Addendum 155: a destination-less packet is a BARE observation
+            // (the packet carries no ended status), so the centralized
+            // clear guard decides — an unconfirmed or queued destination
+            // is kept, and a confirmed one needs 3 bare empties in a row.
             clearNavigation(notifySharedState = true, sendClearToComma = false)
         }
     }
