@@ -68,6 +68,9 @@ object NavStateManager {
         consecutiveEmptyDestinationSnapshots = 0
         navClearedByUser = false
         clearedDestination = null
+        // Addendum 162: a phone route fetched for a DIFFERENT
+        // destination must never guide a new trip.
+        if (phoneRouteDestination?.isSameAs(dest) != true) clearPhoneRoute()
     }
 
     /**
@@ -442,6 +445,54 @@ object NavStateManager {
      */
     @Volatile
     var queuedOutOfSync: Boolean = false
+
+    /**
+     * The phone-fetched route for the queued destination
+     * (Addendum 162: phone-side routing restored, reversing the
+     * 2026-10-31 removal). Fetched by MainActivity's phone-guidance
+     * driver through the [PhoneSourceOrder] routing plan; consumed
+     * through [phoneGuidanceRoute] only while phone guidance is the
+     * navigator. Kept OUT of [activeRoutes]: the comma snapshot
+     * owns that list, and the comma's routes replace this one the
+     * moment the comma guides. Standby only — cleared when the
+     * destination changes or navigation clears.
+     */
+    @Volatile
+    var phoneRoute: RouteOption? = null
+
+    /** The destination [phoneRoute] was fetched for. */
+    @Volatile
+    var phoneRouteDestination: NavDestination? = null
+
+    fun setPhoneRoute(route: RouteOption, dest: NavDestination) {
+        phoneRoute = route
+        phoneRouteDestination = dest
+        notifyChanged()
+    }
+
+    fun clearPhoneRoute() {
+        phoneRoute = null
+        phoneRouteDestination = null
+    }
+
+    /**
+     * The phone route when phone guidance is the navigator right
+     * now (destination queued, comma not guiding fresh, route
+     * fetched for the active destination) — the route the guidance
+     * derivation and both route displays should use; null in every
+     * other state (see [PhoneGuidance.effectiveRoute]).
+     */
+    fun phoneGuidanceRoute(): RouteOption? = PhoneGuidance.effectiveRoute(
+        phoneRoute = phoneRoute,
+        phoneRouteDestination = phoneRouteDestination,
+        activeDestination = activeDestination,
+        queued = activeDestination?.let { queuedDestination?.isSameAs(it) } == true,
+        commaGuiding = PhoneGuidance.commaIsGuiding(
+            lastPacketReceivedAtMs,
+            latestPacket?.nav?.valid == true,
+            System.currentTimeMillis()
+        )
+    )
 
     /** Most recent drive from /api/drives/stats (Feature 13); null until polled. */
     @Volatile
@@ -1005,6 +1056,7 @@ object NavStateManager {
         navClearedByUser = true
         activeDestination = null
         activeRoutes = emptyList()
+        clearPhoneRoute()
         selectedRouteId = 0
         activeTurnCue = null
         clearTripTracking()
@@ -1141,7 +1193,10 @@ object NavStateManager {
         }
         val dest = activeDestination ?: (if (!navClearedByUser) (pkt?.destination ?: latestPacket?.destination) else null)
         val car = currentGps ?: pkt?.gps ?: latestPacket?.gps
-        val chosenRoute = selectedRoute ?: activeRoutes.firstOrNull()
+        // Addendum 162: while phone guidance is the navigator, the
+        // phone-fetched route outranks any stale comma geometry;
+        // phoneGuidanceRoute() is null whenever the comma guides.
+        val chosenRoute = phoneGuidanceRoute() ?: selectedRoute ?: activeRoutes.firstOrNull()
 
         // 1. The comma's live instruction is the source of truth for
         // real maneuvers: show it exactly as issued.
@@ -1177,7 +1232,9 @@ object NavStateManager {
             return NavManeuver(valid = false)
         }
         val dest = activeDestination ?: return NavManeuver(valid = false)
-        val chosenRoute = selectedRoute ?: activeRoutes.firstOrNull()
+        // Addendum 162: the phone-fetched route first — real steps
+        // and geometry instead of the straight-line degradation.
+        val chosenRoute = phoneGuidanceRoute() ?: selectedRoute ?: activeRoutes.firstOrNull()
         return deriveFromRoute(dest, chosenRoute, car)
     }
 

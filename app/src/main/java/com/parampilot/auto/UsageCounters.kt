@@ -26,6 +26,7 @@ object UsageCounters {
     const val GOOGLE_PLACES_AUTOCOMPLETE = "google_places_autocomplete"
     const val GOOGLE_PLACES_DETAILS = "google_places_details"
     const val GOOGLE_ROADS = "google_roads"
+    const val GOOGLE_DIRECTIONS = "google_directions"
     const val GOOGLE_TILES_SESSION = "google_tiles_session"
     const val OSM_OVERPASS = "osm_overpass"
     const val PHOTON_SEARCH = "photon_search"
@@ -44,6 +45,7 @@ object UsageCounters {
         GOOGLE_PLACES_AUTOCOMPLETE,
         GOOGLE_PLACES_DETAILS,
         GOOGLE_ROADS,
+        GOOGLE_DIRECTIONS,
         GOOGLE_TILES_SESSION,
         OSM_OVERPASS,
         PHOTON_SEARCH,

@@ -16,6 +16,7 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.location.Location
 import android.location.LocationListener
+import java.util.concurrent.atomic.AtomicBoolean
 import android.location.LocationManager
 import android.os.Build
 import android.os.Looper
@@ -623,14 +624,19 @@ class MainActivity : Activity() {
                 }
             } else {
                 // If route changed without destination changing (e.g. from comma status polling)
-                val sharedRoutes = NavStateManager.activeRoutes
-                val sharedSel = NavStateManager.selectedRouteId
+                // Addendum 162: while phone guidance navigates on a
+                // phone-fetched route and the comma has supplied no
+                // routes, the phone route is the displayed route.
+                val commaRoutes = NavStateManager.activeRoutes
+                val phoneRoute = if (commaRoutes.isEmpty()) NavStateManager.phoneGuidanceRoute() else null
+                val sharedRoutes = if (phoneRoute != null) listOf(phoneRoute) else commaRoutes
+                val sharedSel = if (phoneRoute != null) phoneRoute.id else NavStateManager.selectedRouteId
                 if (sharedRoutes != activeRoutes || sharedSel != selectedRouteId) {
                     activeRoutes = sharedRoutes
                     selectedRouteId = sharedSel
                     if (sharedRoutes.isNotEmpty()) {
                         drawRoutesOnMap(sharedRoutes, sharedSel)
-                        val chosen = NavStateManager.selectedRoute
+                        val chosen = NavStateManager.selectedRoute ?: phoneRoute
                         if (chosen != null) {
                             if (chosen.durationMin <= 0 && chosen.distanceMiles <= 0.0) {
                                 // Route carries no provided duration/distance: hide, don't show 0/0.
@@ -1166,6 +1172,11 @@ class MainActivity : Activity() {
         // updateGps itself ignores the phone fix when the comma is
         // providing one.
         NavStateManager.updateGps(gps)
+        // Addendum 162: keep a real phone-fetched route under the
+        // guidance — fetched when guidance starts, refetched when
+        // the driver leaves it. Async; the maneuver below already
+        // uses whatever route state exists.
+        maybeFetchPhoneRoute(loc, dest)
         val maneuver = NavStateManager.phoneManeuver(gps)
         if (maneuver.valid && maneuver.street.isNotEmpty()) {
             NavStateManager.activeTurnCue =
@@ -1180,6 +1191,104 @@ class MainActivity : Activity() {
             updateTripInfo(dest, null)
             if (PhoneGuidance.isArrival(maneuver)) onPhoneGuidanceArrived(dest)
         }
+    }
+
+    // ---- Phone-route fetch driver (Addendum 162) ----
+
+    private val phoneRouteFetchInFlight = AtomicBoolean(false)
+
+    /** Last phone-route fetch attempt (initial or reroute), for the
+     *  failure backoff; 0 = none yet this guidance session. */
+    @Volatile
+    private var lastPhoneRouteAttemptAtMs: Long = 0L
+
+    /** Last successful REROUTE fetch, for the reroute cooldown. */
+    @Volatile
+    private var lastPhoneRerouteAtMs: Long = 0L
+
+    /**
+     * Keeps a phone-fetched route under active phone guidance:
+     * fetches one when none exists for the queued destination yet,
+     * and refetches from the current position when the driver has
+     * deviated from the route beyond [PhoneReroute]'s threshold
+     * (cooldown-bounded). Runs on the location thread; the fetch
+     * itself runs on a background thread and publishes through
+     * [NavStateManager.setPhoneRoute], which re-renders both
+     * displays. All-fail leaves guidance degraded and journals the
+     * failure — never a fake route.
+     */
+    private fun maybeFetchPhoneRoute(loc: Location, dest: NavDestination) {
+        if (!dest.hasCoordinates) return
+        // Matrix gate (Addendum 143): no phone internet, no phone
+        // data fetches. Cloud gate: routingPlan is empty while
+        // phone data is not allowed on the transport.
+        if (!NavStateManager.phoneInternet) return
+        val now = System.currentTimeMillis()
+        val route = NavStateManager.phoneRoute
+            ?.takeIf { NavStateManager.phoneRouteDestination?.isSameAs(dest) == true }
+        val isReroute: Boolean
+        if (route == null) {
+            // Initial fetch: immediate on the first fix, then the
+            // failure backoff spaces retries.
+            if (lastPhoneRouteAttemptAtMs > 0L &&
+                now - lastPhoneRouteAttemptAtMs < PhoneReroute.FETCH_RETRY_BACKOFF_MS
+            ) return
+            isReroute = false
+        } else {
+            val deviation = PhoneReroute.distanceToRouteM(route.points, loc.latitude, loc.longitude)
+            val distToDest = GuidanceMath.haversineM(
+                loc.latitude, loc.longitude, dest.latitude, dest.longitude
+            )
+            if (!PhoneReroute.shouldReroute(
+                    hasRoute = true,
+                    deviationM = deviation,
+                    distanceToDestM = distToDest,
+                    nowMs = now,
+                    lastRerouteAtMs = lastPhoneRerouteAtMs
+                )
+            ) return
+            isReroute = true
+        }
+        val googleKey = PhoneGoogle.effectiveGoogleKey()
+        val mapboxToken = MapSourceChoice.effectiveMapboxToken()
+        val plan = PhoneSourceOrder.routingPlan(
+            commaGuiding = false,
+            googleUsable = googleKey != null,
+            mapboxUsable = mapboxToken != null,
+            phoneDataAllowed = HeartbeatTransport.phoneDataAllowed(NavStateManager.activeTransport)
+        )
+        if (plan.isEmpty()) return
+        if (!phoneRouteFetchInFlight.compareAndSet(false, true)) return
+        lastPhoneRouteAttemptAtMs = now
+        val startLat = loc.latitude
+        val startLng = loc.longitude
+        Thread({
+            try {
+                val fetched = NavigationManager().fetchPhoneRoute(
+                    startLat, startLng, dest.latitude, dest.longitude,
+                    plan, googleKey, mapboxToken
+                )
+                if (fetched != null) {
+                    // The destination may have been accepted by the
+                    // comma or cancelled while the fetch ran; only
+                    // install for the trip still on screen.
+                    if (NavStateManager.activeDestination?.isSameAs(dest) == true &&
+                        NavStateManager.queuedDestination?.isSameAs(dest) == true
+                    ) {
+                        NavStateManager.setPhoneRoute(fetched, dest)
+                        if (isReroute) lastPhoneRerouteAtMs = System.currentTimeMillis()
+                    }
+                } else {
+                    ConnectionJournal.record(
+                        ConnectionJournal.CAT_HTTP,
+                        "phone route fetch failed: " +
+                            (NavigationManager.lastPhoneRouteError ?: "no route from any provider")
+                    )
+                }
+            } finally {
+                phoneRouteFetchInFlight.set(false)
+            }
+        }, "phone-route").start()
     }
 
     /** Phone guidance reached the destination: the queued send is
