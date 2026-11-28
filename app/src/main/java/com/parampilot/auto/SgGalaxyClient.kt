@@ -218,6 +218,60 @@ class SgGalaxyClient(baseUrl: String) {
     fun postRecordingsAction(body: JSONObject): Pair<Int, JSONObject?> =
         postJson(PATH_RECORDINGS_ACTION, body)
 
+    /**
+     * GET /api/sentry/events with the HTTP code preserved (see
+     * [SentryEvents]): 503 {"error": "Local motion events are
+     * unavailable"} when the comma cannot read its store, which
+     * getJson would flatten to null. Returns (httpCode, parsedJson?).
+     */
+    fun fetchSentryEvents(): Pair<Int, JSONObject?> {
+        val (code, body) = getRaw(PATH_SENTRY_EVENTS)
+        val json = body?.let { try { JSONObject(it) } catch (_: Exception) { null } }
+        return code to json
+    }
+
+    /** GET /api/sentry/notifications — the notification state (see [SentryEvents]). */
+    fun fetchSentryNotifications(): Pair<Int, JSONObject?> {
+        val (code, body) = getRaw(PATH_SENTRY_NOTIFICATIONS)
+        val json = body?.let { try { JSONObject(it) } catch (_: Exception) { null } }
+        return code to json
+    }
+
+    /**
+     * POST /api/sentry/events/delete (see [SentryEvents.deletePayload]
+     * / [SentryEvents.deleteAllPayload]). 200 carries the fresh
+     * snapshot merged with {"more": bool}; failures carry the
+     * server's error. A Galaxy session is required (401 otherwise).
+     */
+    fun postSentryEventsDelete(body: JSONObject): Pair<Int, JSONObject?> =
+        postJson(PATH_SENTRY_EVENTS_DELETE, body)
+
+    /**
+     * GET /api/sentry/image/<eventId>/<camera> — one stored event
+     * photo as raw JPEG bytes (see [SentryEvents]). Returns
+     * (httpCode, jpegBytes?, serverError?): on 2xx the bytes are
+     * the JPEG; on failure the server's own error text rides along.
+     * HTTP only — a ~1 MB photo does not ride the BLE bridge, and
+     * the Galaxy portal likewise hides event photos over Bluetooth.
+     */
+    fun fetchSentryImage(eventId: String, camera: String): Triple<Int, ByteArray?, String?> {
+        val path = SentryEvents.imagePath(eventId, camera)
+        val result = withReloginRetry { doGetBytes(path) }
+        val (code, bytes) = result
+        if (code in 200..299) {
+            lastServedTransport = HeartbeatTransport.httpTransport(isCloudBase)
+            return Triple(code, bytes, null)
+        }
+        val err = bytes?.let {
+            try {
+                JSONObject(it.toString(Charsets.UTF_8)).optString("error", "").ifEmpty { null }
+            } catch (_: Exception) {
+                null
+            }
+        }
+        return Triple(code, null, err)
+    }
+
     /** The absolute URL a media player loads for [path] on this base. */
     fun mediaUrl(path: String): String = baseUrl + path
 
@@ -558,6 +612,44 @@ class SgGalaxyClient(baseUrl: String) {
         }
     }
 
+    /**
+     * HTTP-only GET with a raw-bytes response — for Sentry event
+     * photos ([fetchSentryImage]). Deliberately NOT routed through
+     * the BLE bridge (a ~1 MB photo is far too large for it), and
+     * deliberately NOT [doGetRaw]: a JPEG must never pass through a
+     * String. Same session bootstrap and cookie handling as the
+     * POST-bytes path; error bodies come back as bytes too.
+     */
+    private fun doGetBytes(path: String): Pair<Int, ByteArray?> {
+        if (isCloudBase && GalaxyCloudSession.currentToken() == null && GalaxyCloudSession.hasPassword()) {
+            GalaxyCloudSession.login(baseUrl)
+        } else if (!isCloudBase && GalaxyCloudSession.currentLocalToken() == null) {
+            GalaxyCloudSession.refreshLocalSession(baseUrl)
+        } else if (!isCloudBase) {
+            GalaxyCloudSession.ensurePaired(baseUrl)
+        }
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL("$baseUrl$path").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = timeoutMs
+                readTimeout = TIMEOUT_IMAGE_MS
+                useCaches = false
+                setRequestProperty("Accept", "image/jpeg, application/json")
+                applySessionCookie(this)
+            }
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val bytes = stream?.use { it.readBytes() }
+            code to bytes
+        } catch (e: Exception) {
+            Log.w(TAG, "GET $path (bytes) error: ${e.message}")
+            -1 to null
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
     fun getJson(path: String): JSONObject? {
         val (code, body) = getRaw(path)
         if (code != 200 || body == null) return null
@@ -730,6 +822,7 @@ class SgGalaxyClient(baseUrl: String) {
         private const val TIMEOUT_LOCAL_MS = 3000
         private const val TIMEOUT_CLOUD_MS = 8000
         private const val TIMEOUT_NETWORKS_MS = 60000
+        private const val TIMEOUT_IMAGE_MS = 30000
         private const val TIMEOUT_MS = 2500
         const val CLOUD_HOST = "galaxy.firestar.link"
         private const val PATH_NAV_STATUS = "/api/navigation/status"
@@ -756,6 +849,9 @@ class SgGalaxyClient(baseUrl: String) {
         const val PATH_RECORDINGS_LOCAL = "/api/recordings/local"
         const val PATH_RECORDINGS_ACTION = "/api/recordings/action"
         const val PATH_RECORDINGS_DETAIL = "/api/recordings/detail"
+        const val PATH_SENTRY_EVENTS = "/api/sentry/events"
+        const val PATH_SENTRY_EVENTS_DELETE = "/api/sentry/events/delete"
+        const val PATH_SENTRY_NOTIFICATIONS = "/api/sentry/notifications"
 
         /** Returns standard RFC 6454 scheme://host[:port] Origin without path slugs. */
         fun originFor(endpointUrl: String): String {
