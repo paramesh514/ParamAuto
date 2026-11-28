@@ -19,7 +19,9 @@ data class SoftwareUpdateStatus(
     val updateReady: Boolean,
     val lastCheckedAt: String,
     val progressText: String,
-    val autoDownloads: Boolean? = null
+    val autoDownloads: Boolean? = null,
+    /** The comma's updater has a request of its own still pending (operations.request). */
+    val requestPending: Boolean = false
 )
 
 /**
@@ -84,6 +86,9 @@ class CommaSoftwareUpdate(private val client: SgGalaxyClient) {
             val lastCheckedAt = updater?.optString("lastCheckedAt", "").orEmpty()
 
             val operations = json.optJSONObject("operations")
+            // operations.request is the updater's own in-flight
+            // request object, or JSON null when it has none.
+            val requestPending = operations?.optJSONObject("request") != null
             val progress = operations?.optJSONObject("progress")
             val stage = clean(progress?.optString("stage", "").orEmpty())
             val detail = clean(progress?.optString("detail", "").orEmpty())
@@ -118,7 +123,8 @@ class CommaSoftwareUpdate(private val client: SgGalaxyClient) {
                 updateReady = updateReady,
                 lastCheckedAt = lastCheckedAt,
                 progressText = progressText,
-                autoDownloads = autoDownloads
+                autoDownloads = autoDownloads,
+                requestPending = requestPending
             )
         }
 

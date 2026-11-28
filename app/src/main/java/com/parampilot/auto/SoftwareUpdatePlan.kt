@@ -14,8 +14,15 @@ package com.parampilot.auto
  * 1 s heartbeat. The engine therefore runs off the heartbeat alone:
  * it retries the install POST while the comma answers and the car is
  * parked, and reads completion from the reboot cycle itself (the
- * comma accepted the install, went down, and came back). No status
- * reads are needed — or allowed — while updating.
+ * comma accepted the install, went down, and came back).
+ *
+ * Addendum 160: the reboot cycle alone proved not to be enough — a
+ * restart the app never observed (and an install the comma performed
+ * after refusing the app's duplicate POST) left the state stuck. So
+ * before any (re-)POST, on the same attempt cadence, the engine now
+ * also reconciles the intent against one software status read (see
+ * [reconcile]); that read is part of the install workflow itself and
+ * is the only addition to the heartbeat traffic.
  *
  * Persistence lives in SoftwareUpdateIntentStore; this file is the
  * pure decision logic.
@@ -39,7 +46,15 @@ data class SoftwareUpdatePending(
      * An install the comma answered with an error status is a refusal,
      * NOT unconfirmed — it retries on the normal cadence.
      */
-    val attemptUnconfirmed: Boolean = false
+    val attemptUnconfirmed: Boolean = false,
+    /**
+     * True when the comma answered an install POST by saying its
+     * updater is already busy / a request is already pending
+     * (Addendum 160): the work is happening server-side, so the engine
+     * must not re-POST into another refusal — it waits and reconciles
+     * against the software status instead (see [SoftwareUpdatePlan.reconcile]).
+     */
+    val serverBusy: Boolean = false
 )
 
 /**
@@ -102,5 +117,80 @@ object SoftwareUpdatePlan {
         } else {
             Decision.WAITING
         }
+    }
+
+    // ---- Addendum 160: status reconciliation + attempt outcomes ----
+    //
+    // The heartbeat-only decisions above cannot see two things: a
+    // restart the app never observed (the engine itself only runs
+    // after a successful nav-status fetch, so a reboot — which takes
+    // nav status down with the heartbeat — is invisible to the
+    // commaWentDown latch), and an install the comma carried out
+    // after refusing the app's duplicate POST with a 409. The engine
+    // therefore reconciles against GET /api/software/status before
+    // any (re-)POST: one status read per attempt cadence, part of
+    // the install workflow itself. Everything below is the pure
+    // decision; CommaClient executes it.
+
+    /** The facts of one successful software status read that the reconciliation needs. */
+    data class StatusFacts(
+        /** Installed commit (short form) the status reports; "" when unreadable. */
+        val installedCommit: String,
+        /** The comma's updater is idle (not checking/downloading/installing). */
+        val updaterIdle: Boolean,
+        /** The comma's updater has a request of its own still pending. */
+        val requestPending: Boolean,
+        /** A downloaded update is still finalized and awaiting install. */
+        val finalizedReady: Boolean
+    )
+
+    enum class Reconcile {
+        /** The installed commit moved past the intent's base: the install landed. */
+        COMPLETE_COMMIT_CHANGED,
+
+        /** Updater idle, nothing pending, nothing left to install: the intent has no job left. */
+        COMPLETE_NOTHING_LEFT,
+
+        /** The comma is still working (updater busy or its own request pending): wait, don't POST. */
+        WAIT,
+
+        /** A finalized update is still waiting and the updater is free: the intent may POST. */
+        PROCEED
+    }
+
+    fun reconcile(pending: SoftwareUpdatePending, facts: StatusFacts): Reconcile {
+        if (facts.installedCommit.isNotEmpty() && pending.baseCommit.isNotEmpty() &&
+            facts.installedCommit != pending.baseCommit
+        ) {
+            return Reconcile.COMPLETE_COMMIT_CHANGED
+        }
+        if (facts.requestPending || !facts.updaterIdle) return Reconcile.WAIT
+        if (facts.finalizedReady) return Reconcile.PROCEED
+        return Reconcile.COMPLETE_NOTHING_LEFT
+    }
+
+    /** The server reports an idle updater as "idle" — or as no state at all. */
+    fun isIdleUpdaterState(state: String): Boolean =
+        state.isBlank() || state.equals("idle", ignoreCase = true)
+
+    enum class AttemptOutcome { ACCEPTED, UNCONFIRMED, BUSY_REFUSAL, REFUSED }
+
+    /**
+     * Classifies an install POST's result. [code] uses SgGalaxyClient's
+     * result contract: 2xx answered success, an HTTP status is an
+     * answered refusal, -1 is no answer at all and -3 is the BLE
+     * ambiguous code (the POST may have executed). A refusal whose
+     * [reason] (the server's own error text) says the updater is busy
+     * or a request is pending is a BUSY_REFUSAL: the install is
+     * already happening server-side, so the engine waits on status
+     * instead of re-arming the same POST.
+     */
+    fun classifyAttempt(code: Int, reason: String?): AttemptOutcome = when {
+        code in 200..299 -> AttemptOutcome.ACCEPTED
+        code == -1 || code == -3 -> AttemptOutcome.UNCONFIRMED
+        reason != null && (reason.contains("busy", ignoreCase = true) ||
+            reason.contains("pending", ignoreCase = true)) ->
+            AttemptOutcome.BUSY_REFUSAL
+        else -> AttemptOutcome.REFUSED
     }
 }
